@@ -94,6 +94,9 @@ struct srvevents {
 	/* Called during a server tick if a valid packet is available.
 	 * This event is only called for clients that got approved in the `onconnect` stage. */
 	void	(*onreceivepkt)(uint16_t external_tick, packet_t *p_in, netsrvclient_t *client, void *userdata);
+	/* Called before the onsendpkt event occours for any client.
+	 * Only called once per tick. */
+	void 	(*bonsendpkt)(netsrvclient_t *first);
 	/* Called every server tick.
 	 * This event is only called for clients that got approved in the `onconnect` stage. */
 	void  	(*onsendpkt)(uint16_t local_tick, packet_t *p_out, netsrvclient_t *client, void *userdata);
@@ -149,10 +152,14 @@ void client_disconnect(netconn_t *conn);
  * Should be called in the event `ondisconnect`. */
 void client_free(netconn_t **conn);
 
+/* return the next client, or NULL. 
+ * can be used in the event `bonsendpkt` with the `first` client. */
+netsrvclient_t 	*server_cli_get_next(netsrvclient_t *client);
+void 			*server_cli_get_userdata(netsrvclient_t *client);
 /* return the port of the client in host byte order */
-uint16_t 	server_cli_get_port(netsrvclient_t *client);
+uint16_t 		server_cli_get_port(netsrvclient_t *client);
 /* return a pointer to the internal array containing the address of the `client` represented as a string */
-char 		*server_cli_get_addrstr(netsrvclient_t *client);
+char 			*server_cli_get_addrstr(netsrvclient_t *client);
 
 const struct netstats *conn_get_stats(netconn_t *conn);
 #endif

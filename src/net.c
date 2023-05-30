@@ -405,6 +405,11 @@ pending_connection:
 		}
 	}
 send_process:
+	if (conn->data.srv.events.bonsendpkt != NULL) {
+		if (HASH_COUNT(conn->data.srv.connected_clients) > 0) {
+			conn->data.srv.events.bonsendpkt(conn->data.srv.connected_clients);
+		}
+	}
 	/* process and send data to connected clients */
 	for (client = conn->data.srv.connected_clients; client != NULL; ) {
 		if (client->common.n_local_tick_noresp + 1 < UINT16_MAX) {
@@ -483,6 +488,31 @@ server_close(netconn_t *conn)
 	conn->data.srv.is_closing = 1;
 }
 
+netsrvclient_t *
+server_cli_get_next(netsrvclient_t *client)
+{
+	if (client == NULL)
+		return NULL;
+
+	netsrvclient_t *next = client->hh.next;
+	while (next != NULL) {
+		if (next->common.msg == SRV_NONE || next->common.msg == SRV_REQUEST_RESET_TICK_COUNT) {
+			/* it's a connected client */
+			return next;
+		}
+		next = next->hh.next;
+	}
+	return NULL;
+}
+
+void *
+server_cli_get_userdata(netsrvclient_t *client)
+{
+	if (client == NULL)
+		return NULL;
+	return client->userdata;
+}
+
 uint16_t
 server_cli_get_port(netsrvclient_t *client)
 {
@@ -498,6 +528,8 @@ server_cli_get_addrstr(netsrvclient_t *client)
 void
 client_disconnect(netconn_t *conn)
 {
+	if (conn == NULL)
+		return;
 	conn->data.cli.common.msg = CLI_NOTICE_DISCONNECT;
 }
 
