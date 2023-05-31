@@ -329,7 +329,13 @@ server_process(netconn_t *conn)
 
 		if (client == NULL) {
 			if (cli_msg == CLI_NOTICE_DISCONNECT) {
-				/* already disconnected client */
+				/* already disconnected client. 
+				 * Send a reply letting it know that it's aleready considered as disconnected. */
+				packet_rewind(conn->out_packet);
+				packet_w_16_t(conn->out_packet, &conn->local_tick);
+				packet_w_bits(conn->out_packet, SRV_NOTICE_KICK, MESSAGE_SIZE_BITS_SRV);
+				packet_w_bits(conn->out_packet, EKICK_DISCONNECT, network_kick_bit_size);
+				SENDTO(conn->fd,conn->out_buffer, packet_get_length(conn->out_packet), sockaddr_client, socklen)
 				continue;
 			}
 			/* initialize client */
@@ -625,7 +631,9 @@ applypacket:
 	packet_w_16_t(conn->out_packet, &conn->local_tick);
 	packet_w_bits(conn->out_packet, conn->data.cli.common.msg, MESSAGE_SIZE_BITS_CLI);
 	/* call onsend */
-	conn->data.cli.events.onsendpkt(conn->out_packet);
+	if (conn->data.cli.common.msg != CLI_NOTICE_DISCONNECT) {
+		conn->data.cli.events.onsendpkt(conn->out_packet);
+	}
 send_pkt:
 	SENDTO(conn->fd, conn->out_buffer, packet_get_length(conn->out_packet), conn->data.cli.sockaddr_server, socklen);
 	conn->data.cli.common.expected_remote_tick++;
