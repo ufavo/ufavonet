@@ -37,6 +37,7 @@
 
 #include "../modules/uthash/src/uthash.h"
 
+#include "_netmsg.h"
 
 
 enum network_message
@@ -77,6 +78,7 @@ struct srvclient {
 	struct conncommon 			common;
 	enum netconn_kick_reason 	kick_reason;
 	struct sockaddr_in			sockaddr;
+	struct msg_handle 			*msghandle;
 	void 						*userdata;
 
 	/* Hash table stuff */
@@ -89,6 +91,7 @@ struct cliconn {
 	struct clievents 	events;
 	struct conncommon 	common;	
 	struct sockaddr_in 	sockaddr_server;
+	struct msg_handle 	*msghandle;
 };
 
 /* struct that holds data needed by a server */
@@ -113,6 +116,7 @@ struct netconn {
 		struct srvconn 	srv;
 		struct cliconn 	cli;
 	} data;
+	void 				*userdata;
 };
 
 void
@@ -127,12 +131,21 @@ diep(char *s)
 	(conn)->in_packet = packet_init_from_buff((conn)->in_buffer, SERVER_BUFFER_LEN); \
 	(conn)->out_packet = packet_init_from_buff((conn)->out_buffer, SERVER_BUFFER_LEN); \
 	(conn)->settings = settings; \
+	(conn)->userdata = userdata; \
 	/* stats */ \
 	(conn)->stats.total_sent_bytes = 0; \
 	(conn)->stats.total_received_bytes = 0;
 
+#define SRVCLIENT_FREE(conn, tmp_client, client, kick_reason) \
+	(conn)->data.srv.events.ondisconnect(conn, (conn)->userdata, kick_reason, client, &((client)->userdata)); \
+	tmp_client = client; \
+	client = (client)->hh.next; \
+	HASH_DEL((conn)->data.srv.connected_clients, tmp_client); \
+	msghandle_free(&((tmp_client)->msghandle)); \
+	free(tmp_client);
+
 netconn_t *
-server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const struct netsettings settings)
+server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const struct netsettings settings, void *userdata)
 {
 	netconn_t 				*conn = malloc(sizeof(netconn_t));
 	struct sockaddr_in 		sockaddr_server = {0};
@@ -186,14 +199,13 @@ server_free(netconn_t **conn)
 		/* if for some reason the server is not empty */
 		for (client = c->data.srv.connected_clients; client != NULL; ) {
 			/* free client */
-			tmpcli = client;
-			client = client->hh.next;
-
-			c->data.srv.events.ondisconnect(EKICK_SERVER_CLOSING, tmpcli, &tmpcli->userdata);
-			free(tmpcli);
+			SRVCLIENT_FREE(c, tmpcli, client, EKICK_SERVER_CLOSING);
 		}
 	}
-	client_free(conn);
+	close(c->fd);
+	packet_free(&c->in_packet);
+	packet_free(&c->out_packet);
+	free(c);
 	*conn = NULL;
 }
 
@@ -209,13 +221,14 @@ client_free(netconn_t **conn)
 	close(c->fd);
 	packet_free(&c->in_packet);
 	packet_free(&c->out_packet);
+	msghandle_free(&c->data.cli.msghandle);	
 	free(c);
 	*conn = NULL;
 
 }
 
 netconn_t *
-client_init(in_addr_t ip, in_port_t port, const struct clievents events, const struct netsettings settings)
+client_init(in_addr_t ip, in_port_t port, const struct clievents events, const struct netsettings settings, void *userdata)
 {
 	netconn_t 	*conn = malloc(sizeof(netconn_t));
 	int 		flags;
@@ -243,6 +256,8 @@ client_init(in_addr_t ip, in_port_t port, const struct clievents events, const s
 	conn->data.cli.common.expected_remote_tick = 0;
 	conn->data.cli.common.cur_remote_tick = 0;
 	conn->data.cli.common.n_local_tick_noresp = 0;
+
+	conn->data.cli.msghandle = msghandle_init();
 
 	/* initialize common stuff */
 	NETCONN_INIT_COMMON(conn);
@@ -273,8 +288,10 @@ client_init(in_addr_t ip, in_port_t port, const struct clievents events, const s
 
 #define SRV_KICK_CLIENT(clientptr,reason) (clientptr)->common.msg = SRV_NOTICE_KICK; (clientptr)->kick_reason = reason; (clientptr)->common.cur_remote_tick = 0;
 
+#define SRV_CLIENT_ISCONNECTED(client) ((client)->common.msg == SRV_NONE || (client)->common.msg == SRV_REQUEST_RESET_TICK_COUNT)
+
 void
-server_process(netconn_t *conn)
+server_process(netconn_t **__conn)
 {
 	ssize_t 					recvlen;
 	uint64_t 					cli_id;
@@ -285,16 +302,21 @@ server_process(netconn_t *conn)
 	int 						err;
 	struct sockaddr_in 			sockaddr_client;
 	socklen_t 					socklen = sizeof(sockaddr_client);
+	netconn_t 					*conn;
 
-	if(conn == NULL)
+	if(__conn == NULL)
 		return;
+	if(*__conn == NULL)
+		return;
+
+	conn = *__conn;
 
 	if (conn->data.srv.is_closing == 1) {
 		/* Server is closing. 
 		 * Incoming packets are ignored. 
 		 * All clients common.msg should now be SRV_NOTICE_KICK. */
 		if (HASH_COUNT(conn->data.srv.connected_clients) == 0) {
-			conn->data.srv.events.onsrvclose();
+			conn->data.srv.events.onsrvclose(__conn, conn->userdata);
 			return;
 		}
 		goto send_process;
@@ -330,7 +352,7 @@ server_process(netconn_t *conn)
 		if (client == NULL) {
 			if (cli_msg == CLI_NOTICE_DISCONNECT) {
 				/* already disconnected client. 
-				 * Send a reply letting it know that it's aleready considered as disconnected. */
+				 * Send a reply letting it know that it's already considered as disconnected. */
 				packet_rewind(conn->out_packet);
 				packet_w_16_t(conn->out_packet, &conn->local_tick);
 				packet_w_bits(conn->out_packet, SRV_NOTICE_KICK, MESSAGE_SIZE_BITS_SRV);
@@ -345,6 +367,7 @@ server_process(netconn_t *conn)
 			client->common.cur_remote_tick = 0;
 			client->common.expected_remote_tick = 0;
 			client->userdata = NULL;
+			client->msghandle = msghandle_init();
 			client->common.msg = SRV_PENDING_CONNECTION;
 			memcpy(&client->sockaddr, &sockaddr_client, socklen);
 			HASH_ADD(hh, conn->data.srv.connected_clients, id, sizeof(cli_id), client);
@@ -359,9 +382,7 @@ server_process(netconn_t *conn)
 		/* Check for messages */
 		if (cli_msg == CLI_NOTICE_DISCONNECT) {
 			/* call ondisconnect and remove client */
-			conn->data.srv.events.ondisconnect(EKICK_DISCONNECT, client, &client->userdata);
-			HASH_DEL(conn->data.srv.connected_clients, client);
-			free(client);
+			SRVCLIENT_FREE(conn, tmp_client, client, EKICK_DISCONNECT);
 			continue;
 		} else if (cli_msg == CLI_NOTICE_RESET_TICK_COUNT) {
 			/* client notified that cli tick count was reseted */
@@ -383,7 +404,7 @@ pending_connection:
 					packet_rewind(conn->out_packet);
 					packet_w_16_t(conn->out_packet, &conn->local_tick);
 					packet_w_bits(conn->out_packet, client->common.msg, MESSAGE_SIZE_BITS_SRV);
-					switch((enum netconn_connect_result)conn->data.srv.events.onconnect(conn->in_packet, conn->out_packet, client, &client->userdata)) {
+					switch((enum netconn_connect_result)conn->data.srv.events.onconnect(conn, conn->userdata, conn->in_packet, conn->out_packet, client, &client->userdata)) {
 						case ECONNECTION_ALLOW:
 							client->common.msg = SRV_NONE;
 							client->common.expected_remote_tick = cli_tick;
@@ -400,7 +421,8 @@ pending_connection:
 				continue;
 			}
 			/* call onreceive */
-			conn->data.srv.events.onreceivepkt(cli_tick, conn->in_packet, client, client->userdata);
+			msg_onreceive_process(conn->in_packet, client->msghandle, conn, conn->userdata, &conn->data.srv.events, NULL, client);
+			conn->data.srv.events.onreceivepkt(conn, conn->userdata, conn->in_packet, client, client->userdata);
 
 			client->common.n_local_tick_noresp = 0;
 		} else if ( client->common.n_local_tick_noresp > 16384 ) {
@@ -413,7 +435,7 @@ pending_connection:
 send_process:
 	if (conn->data.srv.events.bonsendpkt != NULL) {
 		if (HASH_COUNT(conn->data.srv.connected_clients) > 0) {
-			conn->data.srv.events.bonsendpkt(conn->data.srv.connected_clients);
+			conn->data.srv.events.bonsendpkt(conn, conn->userdata, conn->data.srv.connected_clients);
 		}
 	}
 	/* process and send data to connected clients */
@@ -442,11 +464,7 @@ send_process:
 			if (client->common.cur_remote_tick == conn->settings.kick_notice_tick) {
 				/* Kick notice already sent multiple times. 
 				 * Call ondisconnect and remove client */
-				conn->data.srv.events.ondisconnect(client->kick_reason, client, &client->userdata);
-				tmp_client = client;
-				client = client->hh.next;
-				HASH_DEL(conn->data.srv.connected_clients, tmp_client);
-				free(tmp_client);
+				SRVCLIENT_FREE(conn, tmp_client, client, client->kick_reason);
 				continue;
 			}
 			packet_w_bits(conn->out_packet, client->kick_reason, network_kick_bit_size);
@@ -454,7 +472,8 @@ send_process:
 		} else {
 			/* Is a connected client. Call onsend */
 			client->common.expected_remote_tick++;
-			conn->data.srv.events.onsendpkt(conn->local_tick, conn->out_packet, client, client->userdata);
+			msg_onsend_process(conn->out_packet, client->msghandle);
+			conn->data.srv.events.onsendpkt(conn, conn->userdata, conn->out_packet, client, client->userdata);
 		}
 		SENDTO(conn->fd,conn->out_buffer, packet_get_length(conn->out_packet), client->sockaddr, socklen);
 next_send_iter:
@@ -502,7 +521,7 @@ server_cli_get_next(netsrvclient_t *client)
 
 	netsrvclient_t *next = client->hh.next;
 	while (next != NULL) {
-		if (next->common.msg == SRV_NONE || next->common.msg == SRV_REQUEST_RESET_TICK_COUNT) {
+		if (SRV_CLIENT_ISCONNECTED(next)) {
 			/* it's a connected client */
 			return next;
 		}
@@ -540,20 +559,26 @@ client_disconnect(netconn_t *conn)
 }
 
 void
-client_process(netconn_t *conn)
+client_process(netconn_t **__conn)
 {
 	ssize_t 					recvlen;
 	uint16_t		 			srv_tick;
 	uint8_t 					srv_msg;
 	int32_t 					diff, diff1;
-	socklen_t 					socklen = sizeof(conn->data.cli.sockaddr_server);
+	socklen_t 					socklen;
+	netconn_t 					*conn;
 
-	if (conn == NULL)
+	if (__conn == NULL)
 		return;
+	if(*__conn == NULL)
+		return;
+
+	conn = *__conn;
+	socklen = sizeof(conn->data.cli.sockaddr_server);
 	
 	if (conn->data.cli.common.msg == CLI_NOTICE_DISCONNECT) {
 		if (conn->data.cli.common.n_local_tick_noresp == conn->settings.kick_notice_tick) {
-			conn->data.cli.events.ondisconnect(EKICK_DISCONNECT);
+			conn->data.cli.events.ondisconnect(__conn, conn->userdata, EKICK_DISCONNECT);
 			return;
 		}
 	}
@@ -584,7 +609,7 @@ client_process(netconn_t *conn)
 			/* this client has been kicked. call ondisconnect */
 			srv_msg = 0;
 			packet_r_bits(conn->in_packet, &srv_msg, network_kick_bit_size);
-			conn->data.cli.events.ondisconnect(srv_msg);
+			conn->data.cli.events.ondisconnect(__conn, conn->userdata, srv_msg);
 			return;
 		} else if (srv_msg == SRV_REQUEST_RESET_TICK_COUNT) {
 			/* server wants to restart tick count. connection loss scenario */
@@ -603,13 +628,14 @@ applypacket:
 				packet_rewind(conn->out_packet);
 				packet_w_16_t(conn->out_packet, &conn->local_tick);
 				packet_w_bits(conn->out_packet, conn->data.cli.common.msg, MESSAGE_SIZE_BITS_CLI);
-				conn->data.cli.events.onconnect(conn->in_packet, conn->out_packet);
+				conn->data.cli.events.onconnect(conn, conn->userdata, conn->in_packet, conn->out_packet);
 				continue;
 			} else if (conn->data.cli.common.msg == CLI_NOTICE_CONNECTING) {
 				conn->data.cli.common.msg = CLI_NONE;
 			}
 			/* call onreceive */
-			conn->data.cli.events.onreceivepkt(srv_tick,conn->in_packet);
+			msg_onreceive_process(conn->in_packet, conn->data.cli.msghandle, conn, conn->userdata, NULL, &conn->data.cli.events, NULL);
+			conn->data.cli.events.onreceivepkt(conn, conn->userdata, conn->in_packet);
 			if (srv_msg == SRV_NONE && conn->data.cli.common.msg == CLI_NOTICE_RESET_TICK_COUNT) {
 				/* clear the message being sent to server */
 				conn->data.cli.common.msg = CLI_NONE;
@@ -632,7 +658,8 @@ applypacket:
 	packet_w_bits(conn->out_packet, conn->data.cli.common.msg, MESSAGE_SIZE_BITS_CLI);
 	/* call onsend */
 	if (conn->data.cli.common.msg != CLI_NOTICE_DISCONNECT) {
-		conn->data.cli.events.onsendpkt(conn->out_packet);
+		msg_onsend_process(conn->out_packet, conn->data.cli.msghandle);
+		conn->data.cli.events.onsendpkt(conn, conn->userdata, conn->out_packet);
 	}
 send_pkt:
 	SENDTO(conn->fd, conn->out_buffer, packet_get_length(conn->out_packet), conn->data.cli.sockaddr_server, socklen);
@@ -640,10 +667,36 @@ send_pkt:
 	conn->local_tick++;
 	if (conn->data.cli.common.n_local_tick_noresp == conn->settings.timeout_tick) {
 		/* connection timed out. */
-		conn->data.cli.events.ondisconnect(EKICK_CONNECTION_TIMEOUT);
+		conn->data.cli.events.ondisconnect(__conn, conn->userdata, EKICK_CONNECTION_TIMEOUT);
 		return;
 	}
 	conn->data.cli.common.n_local_tick_noresp++;
+}
+
+uint16_t
+client_get_external_tick(netconn_t *conn)
+{
+	if (conn == NULL)
+		return 0;
+	return conn->data.cli.common.cur_remote_tick;
+}
+
+uint16_t
+server_cli_get_external_tick(netsrvclient_t *client)
+{
+	if (client == NULL)
+		return 0;
+	if (!SRV_CLIENT_ISCONNECTED(client))
+		return 0;
+	return client->common.cur_remote_tick;
+}
+
+uint16_t
+conn_get_local_tick(netconn_t *conn)
+{
+	if (conn == NULL)
+		return 0;
+	return conn->local_tick;
 }
 
 const struct netstats *

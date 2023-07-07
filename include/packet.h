@@ -60,6 +60,12 @@ uint32_t packet_get_length(packet_t *p);
 size_t packet_get_buffsize(packet_t *p);
 /* Returns `NULL` if `p` is `NULL`. Otherwise returns the pointer to the internal buffer. */
 void *packet_get_buff(packet_t *p);
+/* Sets the internal buffer pointer to `buff` of `size` and rewinds the packet.
+ * Passing `NULL` to `buff` resets the packet, as if it was just initialized with `packet_init`.
+ * Returns `enum packeterr` error code. */
+int packet_set_buff(packet_t *p, void *buff, const size_t size);
+/* Returns `0` if `p` is `NULL`. Otherwise returns the internal buffer index */
+uint32_t packet_get_index(packet_t *p);
 /* Sets how much readable data this packet contains, in bytes.
  * `value` cannot exceed buffer size. 
  * Returns `enum packeterr` error code. */
@@ -120,5 +126,15 @@ int packet_r_8_t(packet_t *p, void *ptr);
 int packet_r_bits(packet_t *p, uint8_t *ptr, const int n);
 /* Returns `enum packeterr` error code. */
 int packet_r_vlen29(packet_t *p, uint32_t *ptr);
+
+/* Reads `size` bytes from packet `p_from` to packet `p_to` 
+ * Returns `enum packeterr` error code. */
+int packet_rw_packet(packet_t *p_from, packet_t *p_to, const size_t size);
+/* Returns `enum packeterr` error code. */
+int packet_skip(packet_t *p, const size_t size);
+/* Returns `enum packeterr` error code. */
+int packet_skip_bits(packet_t *p, const int n);
+/* Returns `enum packeterr` error code. */
+int packet_skip_vlen29(packet_t *p);
 
 #endif

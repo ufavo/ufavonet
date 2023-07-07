@@ -8,7 +8,6 @@
 #include <ufavonet/packet.h>
 #include <ufavonet/net.h>
 
-netconn_t *conn = NULL;
 static volatile int isclosing = 0;
 
 void handlesigint(int x) {
@@ -38,22 +37,22 @@ print_dreason(int disconnect_reason)
 }
 
 void
-cli_onconnect(packet_t *p_in, packet_t *p_out)
+cli_onconnect(netconn_t *conn, void *userdata, packet_t *p_in, packet_t *p_out)
 {
 	printf("This message only appears if server returns ECONNECTION_AGAIN.\n");
 }
 
 void
-cli_ondisconnect(int disconnect_reason)
+cli_ondisconnect(netconn_t **conn, void *userdata, int disconnect_reason)
 {
-	client_free(&conn);
+	client_free(conn);
 	printf("\nDisconnected! Reason: ");
 	print_dreason(disconnect_reason);
 	printf("Exiting.\n");
 }
 
 void
-cli_onreceivepkt(uint16_t tick, packet_t *p_in)
+cli_onreceivepkt(netconn_t *conn, void *userdata, packet_t *p_in)
 {
 	char msg[256];
 	packet_r(p_in, msg, packet_get_readable(p_in));
@@ -61,7 +60,7 @@ cli_onreceivepkt(uint16_t tick, packet_t *p_in)
 }
 
 void
-cli_onsendpkt(packet_t *p_out)
+cli_onsendpkt(netconn_t *conn, void *userdata, packet_t *p_out)
 {
 	const char *str = "Hello server!";
 	packet_w(p_out, str, strlen(str)+1);
@@ -69,21 +68,21 @@ cli_onsendpkt(packet_t *p_out)
 }
 
 int
-srv_onconnect(packet_t *p_in, packet_t *p_out, netsrvclient_t *client, void **userdata)
+srv_onconnect(netconn_t *conn, void *userdata, packet_t *p_in, packet_t *p_out, netsrvclient_t *client, void **cli_userdata)
 {
 	printf("Client [%s:%d] connected!\n", server_cli_get_addrstr(client), server_cli_get_port(client));
 	return ECONNECTION_ALLOW;	
 }
 
 void
-srv_ondisconnect(int disconnect_reason, netsrvclient_t *client, void **userdata)
+srv_ondisconnect(netconn_t *conn, void *userdata, int disconnect_reason, netsrvclient_t *client, void **cli_userdata)
 {
 	printf("Client [%s:%d] disconnected! Reason: ", server_cli_get_addrstr(client), server_cli_get_port(client));
 	print_dreason(disconnect_reason);
 }
 
 void
-srv_onreceivepkt(uint16_t external_tick, packet_t *p_in, netsrvclient_t *client, void *userdata)
+srv_onreceivepkt(netconn_t *conn, void *userdata, packet_t *p_in, netsrvclient_t *client, void *cli_userdata)
 {
 	char msg[256];
 	/* Read the string from in packet */
@@ -92,7 +91,7 @@ srv_onreceivepkt(uint16_t external_tick, packet_t *p_in, netsrvclient_t *client,
 }
 
 void
-srv_onsendpkt(uint16_t local_tick, packet_t *p_out, netsrvclient_t *client, void *userdata)
+srv_onsendpkt(netconn_t *conn, void *userdata, packet_t *p_out, netsrvclient_t *client, void *cli_userdata)
 {
 	const char *str = "Hello client!";
 	/* Write the string to outgoing packet */
@@ -101,9 +100,9 @@ srv_onsendpkt(uint16_t local_tick, packet_t *p_out, netsrvclient_t *client, void
 }
 
 void
-srv_onsrvclose()
+srv_onsrvclose(netconn_t **conn, void *userdata)
 {
-	server_free(&conn);
+	server_free(conn);
 	printf("\nServer closed gracefully.\n");
 }
 
@@ -140,12 +139,14 @@ usage:
 	}
 	/* handle ctrl+c */
 	signal(SIGINT, handlesigint);
+	
+	netconn_t *conn = NULL;
 
 	if (args[1][0] == 'c') {
-		conn = client_init(inet_addr("127.0.0.1"), htons(27444), cli_events, settings);
+		conn = client_init(inet_addr("127.0.0.1"), htons(27444), cli_events, settings, NULL);
 		printf("Client started!\n");
 	} else if (args[1][0] == 's') {
-		conn = server_init(htonl(INADDR_ANY), htons(27444), srv_events, settings);
+		conn = server_init(htonl(INADDR_ANY), htons(27444), srv_events, settings, NULL);
 		printf("Server started!\n");
 	} else {
 		goto usage;
@@ -153,12 +154,12 @@ usage:
 	printf("Press CTRL-C at any time to stop.\n");
 	while(conn != NULL) {
 		if (args[1][0] == 'c') {
-			client_process(conn);
+			client_process(&conn);
 			if (isclosing == 1) {
 				client_disconnect(conn);
 			}
 		} else {
-			server_process(conn);
+			server_process(&conn);
 			if (isclosing == 1) {
 				server_close(conn);
 			}

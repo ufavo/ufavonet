@@ -208,10 +208,9 @@ int nettest_srvstep = 0;
 int nettest_step = 0;
 int nettest_fail = 0;
 char nettest_failmsg[1024];
-netconn_t *cli_info = NULL, *srv_info = NULL;
 /* client side */
 void
-cli_onconnect(packet_t *p_in, packet_t *p_out)
+cli_onconnect(netconn_t *conn, void *userdata, packet_t *p_in, packet_t *p_out)
 {
 	/* complete the server onconnect sum challenge */
 	uint32_t x = 0, y = 0, z = 0;
@@ -226,13 +225,13 @@ cli_onconnect(packet_t *p_in, packet_t *p_out)
 	}
 }
 void
-cli_ondisconnect(int disconnect_reason)
+cli_ondisconnect(netconn_t **conn, void *userdata, int disconnect_reason)
 {
-	client_free(&cli_info);
+	client_free(conn);
 	printf("\t[client] ondisconnect got called with reason: %d\n", disconnect_reason);
 }
 void
-cli_onreceivepkt(uint16_t tick, packet_t *p_in)
+cli_onreceivepkt(netconn_t *conn, void *userdata, packet_t *p_in)
 {
 	uint8_t len = 0;
 	char msg[256];
@@ -259,7 +258,7 @@ struct serversumchallenge {
 };
 
 void
-cli_onsendpkt(packet_t *p_out)
+cli_onsendpkt(netconn_t *conn, void *userdata, packet_t *p_out)
 {
 	const char *str = NETTEST_CLI_MESSAGE;
 	const uint8_t len = strlen(str)+1;
@@ -274,16 +273,16 @@ cli_onsendpkt(packet_t *p_out)
 }
 /* server side */
 int
-onconnect(packet_t *p_in, packet_t *p_out, netsrvclient_t *client, void **userdata)
+onconnect(netconn_t *conn, void *userdata, packet_t *p_in, packet_t *p_out, netsrvclient_t *client, void **cliuserdata)
 {
 	struct serversumchallenge *challenge;
 	printf("\t[server] onconnect event got called.\n");
 
-	if (*userdata == NULL) {
+	if (*cliuserdata == NULL) {
 		printf("\t[server] onconnect setting up challenge.\n");
 		/* setup a sum challenge */
-		*userdata = malloc(sizeof(struct serversumchallenge));
-		challenge = *userdata;
+		*cliuserdata = malloc(sizeof(struct serversumchallenge));
+		challenge = *cliuserdata;
 		challenge->x = random() % (UINT32_MAX / 4);
 		challenge->y = random() % (UINT32_MAX / 4);
 		challenge->z = challenge->x + challenge->y;
@@ -291,28 +290,28 @@ onconnect(packet_t *p_in, packet_t *p_out, netsrvclient_t *client, void **userda
 		/* check challenge response */
 		printf("\t[server] onconnect verifying challenge response.\n");
 		uint32_t cli_resp = 0;
-		challenge = *userdata;
+		challenge = *cliuserdata;
 		packet_r_32_t(p_in, &cli_resp);
 		if (challenge->z == cli_resp) {
 			free(challenge);
-			*userdata = NULL;
+			*cliuserdata = NULL;
 			nettest_step++;
 			printf("\t[server] onconnect event allowed the connection.\n");
 			return ECONNECTION_ALLOW;
 		}
 	}
-	challenge = *userdata;
+	challenge = *cliuserdata;
 	packet_w_32_t(p_out, &challenge->x);
 	packet_w_32_t(p_out, &challenge->y);
 	return ECONNECTION_AGAIN;
 }
 void
-ondisconnect(int disconnect_reason, netsrvclient_t *client, void **userdata)
+ondisconnect(netconn_t *conn, void *userdata, int disconnect_reason, netsrvclient_t *client, void **cliuserdata)
 {
 	printf("\t[server] ondisconnect got called with reason: %d\n", disconnect_reason);
 }
 void
-onreceivepkt(uint16_t external_tick, packet_t *p_in, netsrvclient_t *client, void *userdata)
+onreceivepkt(netconn_t *conn, void *userdata, packet_t *p_in, netsrvclient_t *client, void *cliuserdata)
 {
 	uint8_t len = 0;
 	char msg[256];
@@ -328,7 +327,7 @@ onreceivepkt(uint16_t external_tick, packet_t *p_in, netsrvclient_t *client, voi
 	}
 }
 void
-onsendpkt(uint16_t local_tick, packet_t *p_out, netsrvclient_t *client, void *userdata)
+onsendpkt(netconn_t *conn, void *userdata, packet_t *p_out, netsrvclient_t *client, void *cliuserdata)
 {
 	const char *str = NETTEST_SRV_MESSAGE;
 	const uint8_t len = strlen(str)+1;
@@ -340,10 +339,10 @@ onsendpkt(uint16_t local_tick, packet_t *p_out, netsrvclient_t *client, void *us
 }
 
 void
-onsrvclose()
+onsrvclose(netconn_t **conn, void *userdata)
 {
 	printf("\t[server] onsrvclose event got called.\n");
-	server_free(&srv_info);
+	server_free(conn);
 }
 
 int
@@ -373,14 +372,15 @@ test_all()
 		.onsrvclose = &onsrvclose
 	};
 
+	netconn_t *cli_info = NULL, *srv_info = NULL;
 	/* initialize server and client */
-	srv_info = server_init(htonl(INADDR_ANY), htons(25565), srvevents, settings);
-	cli_info = client_init(inet_addr("127.0.0.1"), htons(25565), clievents, settings);
+	srv_info = server_init(htonl(INADDR_ANY), htons(25565), srvevents, settings, NULL);
+	cli_info = client_init(inet_addr("127.0.0.1"), htons(25565), clievents, settings, NULL);
 
 	/* process loop */
 	for(i = 0; srv_info != NULL && i < 2048; i++) {
-		client_process(cli_info);
-		server_process(srv_info);
+		client_process(&cli_info);
+		server_process(&srv_info);
 		if (nettest_clistep == 3) {
 			client_disconnect(cli_info);
 			nettest_clistep++;

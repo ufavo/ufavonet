@@ -43,6 +43,15 @@
 #define READCHECK(packet_ptr,size) if ((packet_ptr)->index + size > (packet_ptr)->length) { return EPACKET_ERR_OUT_OF_BOUNDS; }
 #define WRITECHECK(packet_ptr,sz) if ((packet_ptr)->index + sz >= (packet_ptr)->size && (packet_ptr)->realloc_allowed == 0) { return EPACKET_ERR_OUT_OF_BOUNDS; }
 
+#define RESETPACKET(p) \
+	p->data = NULL; \
+	p->size = 0; \
+	p->index = 0; \
+	p->length = 0; \
+	p->realloc_allowed = 1; \
+	p->bits_byte = NULL; \
+	p->bits_index = 0;
+
 
 struct packet
 {
@@ -63,13 +72,7 @@ packet_init(void)
 	if (p == NULL) {
 		return NULL;
 	}
-	p->data = NULL;
-	p->size = 0;
-	p->index = 0;
-	p->length = 0;
-	p->realloc_allowed = 1;
-	p->bits_byte = NULL;
-	p->bits_index = 0;
+	RESETPACKET(p);
 	return p;
 }
 
@@ -151,6 +154,35 @@ packet_get_buff(packet_t *p)
 }
 
 int
+packet_set_buff(packet_t *p, void *buff, const size_t size)
+{
+	NULLCHECK(p);
+	if (buff == NULL) {
+		if (p->realloc_allowed == 1) {
+			free(p->data);
+		}
+		RESETPACKET(p);
+		return 0;
+	}
+	if (p->realloc_allowed == 1) {
+		free(p->data);
+	}
+	p->realloc_allowed = 0;
+	p->data = buff;
+	p->size = size;
+	p->length = 0;
+	packet_rewind(p);
+	return 0;
+}
+
+uint32_t
+packet_get_index(packet_t *p)
+{
+	NULLCHECK(p);
+	return p->index;
+}
+
+int
 packet_set_length(packet_t *p, const uint32_t value)
 {
 	NULLCHECK(p);
@@ -165,14 +197,16 @@ uint32_t
 packet_get_readable(packet_t *p)
 {
 	NULLCHECK(p);
-	return (p->index >= p->length) ? (p->bits_index < 8 && p->bits_byte != NULL ? 1 : 0) : p->length - p->index; 
+	return p->length - p->index; 
 }
 
 int
 packet_w(packet_t *p, const void *ptr, const size_t size)
 {
 	NULLCHECK(p);
-
+	if (size == 0) {
+		return 0;
+	}
 	if(p->data) {
 		if(p->size <= p->index + size) {
 			if (p->realloc_allowed == 1) {
@@ -282,6 +316,9 @@ int
 packet_r_bits(packet_t *p, uint8_t *ptr, const int n)
 {
 	NULLCHECK(p);
+	if (n <= 0 || n > 8) {
+		return EPACKET_ERR_OUT_OF_BOUNDS;
+	}
 	*ptr = 0;
 
 	if (p->bits_byte == NULL) {
@@ -344,6 +381,9 @@ int
 packet_r(packet_t *p, void *ptr, const size_t size)
 {
 	NULLCHECK(p);
+	if (size == 0) {
+		return 0;
+	}
 	READCHECK(p, size);
     memcpy(ptr, p->data + p->index, size);
     p->index += size;
@@ -413,5 +453,53 @@ packet_r_vlen29(packet_t *p, uint32_t *ptr)
 		}
 	}
 	memcpy(ptr, &value, sizeof(uint32_t));
+	return 0;
+}
+
+int
+packet_skip(packet_t *p, const size_t size)
+{
+	NULLCHECK(p);
+	READCHECK(p, size);
+	p->index += size;
+	return 0;
+}
+
+int
+packet_skip_bits(packet_t *p, const int n)
+{
+	NULLCHECK(p);
+	if ( n <= 0 || n > 8) {
+		return EPACKET_ERR_OUT_OF_BOUNDS;
+	}
+	p->bits_index += n;
+	if (p->bits_index > 8) {
+		READCHECK(p, n);
+		p->bits_index -= 8;
+		p->bits_byte = p->data + p->index;
+		p->index++;
+	}
+	return 0;
+}
+
+int
+packet_skip_vlen29(packet_t *p)
+{
+	uint32_t dummy;
+	return packet_r_vlen29(p, &dummy);
+}
+
+int
+packet_rw_packet(packet_t *p_from, packet_t *p_to, const size_t size)
+{
+	NULLCHECK(p_from);
+	NULLCHECK(p_to);
+	READCHECK(p_from, size);
+
+	int err = packet_w(p_to, p_from->data + p_from->index, size);
+	if (err != 0) {
+		return err;
+	}
+	p_from->index += size;
 	return 0;
 }

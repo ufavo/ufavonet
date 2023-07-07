@@ -84,37 +84,45 @@ struct srvevents {
 	 * This is where authentication/identification/verification should happen if needed.
 	 * A client is considered connected whenever `CONNECTION_ALLOW` is returned. 
 	 * `userdata` can be assigned anytime `onconnect` is called. */
-	int 	(*onconnect)(packet_t *p_in, packet_t *p_out, netsrvclient_t *client, void **userdata);
+	int 	(*onconnect)(netconn_t *conn, void *userdata, packet_t *p_in, packet_t *p_out, netsrvclient_t *client, void **cli_userdata);
 	/* Called when a client is kicked, disconnects or lose connection to the server. 
 	 * Called even if the client has not succeded the `onconnect` process.
 	 * Called once per client.
 	 * This is the last call before `client` resources are released. 
 	 * If `userdata` has no more references, release it's resources here. */
-	void	(*ondisconnect)(int disconnect_reason, netsrvclient_t *client, void **userdata);
+	void	(*ondisconnect)(netconn_t *conn, void *userdata, int disconnect_reason, netsrvclient_t *client, void **cli_userdata);
+	/* Called whenever a message sent was acknowledged by the receiver. */
+	void 	(*onmessageack)(netconn_t *conn, void *userdata, int message_id, netsrvclient_t *client);
 	/* Called during a server tick if a valid packet is available.
 	 * This event is only called for clients that got approved in the `onconnect` stage. */
-	void	(*onreceivepkt)(uint16_t external_tick, packet_t *p_in, netsrvclient_t *client, void *userdata);
+	void	(*onreceivepkt)(netconn_t *conn, void *userdata, packet_t *p_in, netsrvclient_t *client, void *cli_userdata);
+	/* Called when a message arrives. */
+	void 	(*onreceivemsg)(netconn_t *conn, void *userdata, packet_t *p_in, netsrvclient_t *client);
 	/* Called before the onsendpkt event occours for any client.
 	 * Only called once per tick. */
-	void 	(*bonsendpkt)(netsrvclient_t *first);
+	void 	(*bonsendpkt)(netconn_t *conn, void *userdata, netsrvclient_t *first);
 	/* Called every server tick.
 	 * This event is only called for clients that got approved in the `onconnect` stage. */
-	void  	(*onsendpkt)(uint16_t local_tick, packet_t *p_out, netsrvclient_t *client, void *userdata);
+	void  	(*onsendpkt)(netconn_t *conn, void *userdata, packet_t *p_out, netsrvclient_t *client, void *cli_userdata);
 	/* Called after a `KICKINF_SERVER_CLOSING` kick happens for all connected clients.
 	 * This event is triggered by a call to `server_close`. */
-	void 	(*onsrvclose)(void);
+	void 	(*onsrvclose)(netconn_t **conn, void *userdata);
 };
 
 struct clievents {
 	/* Step were the connection is negotiated.
 	 * Called until server accept/timeout the connection request. */
-	void	(*onconnect)(packet_t *p_in, packet_t *p_out);
+	void	(*onconnect)(netconn_t *conn, void *userdata, packet_t *p_in, packet_t *p_out);
 	/* Called when a disconnection occours. */
-	void	(*ondisconnect)(int disconnect_reason);
+	void	(*ondisconnect)(netconn_t **conn, void *userdata, int disconnect_reason);
+	/* Called whenever a message sent was acknowledged by the receiver. */
+	void 	(*onmessageack)(netconn_t *conn, void *userdata, int message_id);
 	/* Called during a client tick if a valid packet is avaliable. */
-	void	(*onreceivepkt)(uint16_t tick, packet_t *p_in);
+	void	(*onreceivepkt)(netconn_t *conn, void *userdata, packet_t *p_in);
+	/* Called when a message arrives. */
+	void 	(*onreceivemsg)(netconn_t *conn, void *userdata, packet_t *p_in);
 	/* Called every client tick. */
-	void	(*onsendpkt)(packet_t *p_out);
+	void	(*onsendpkt)(netconn_t *conn, void *userdata, packet_t *p_out);
 };
 
 struct netstats {
@@ -124,11 +132,11 @@ struct netstats {
 
 /* Allocates a new `netconn_t` and initiates a server.
  * `ip` and `port` a#include "ufavonet/packet.h"re expected in network byte order. */
-netconn_t *server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const struct netsettings settings);
+netconn_t *server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const struct netsettings settings, void *userdata);
 /* Should be executed at a constant rate, until the event `onsrvclose` is triggered.
  * Each execution is considered a server tick. 
- * If executed with a `NULL` value as `conn` nothing happens. */
-void server_process(netconn_t *conn);
+ * If executed with a `NULL` value as `__conn` nothing happens. */
+void server_process(netconn_t **__conn);
 /* Initiate the process of closing the server.
  * After called, eventually `onsrvclose` event will be triggered. */
 void server_close(netconn_t *conn);
@@ -140,11 +148,11 @@ void server_kick_client(netsrvclient_t *client, enum netconn_kick_reason reason)
 
 /* Allocates a new `netconn_t` and connects to a server. 
  * `ip` and `port` are expected in network byte order. */
-netconn_t *client_init(in_addr_t ip, in_port_t port, const struct clievents events, const struct netsettings settings);
+netconn_t *client_init(in_addr_t ip, in_port_t port, const struct clievents events, const struct netsettings settings, void *userdata);
 /* Should be executed at a constant rate, until the event `ondisconnect` is triggered.
  * Each execution is considered a client tick. 
- * If executed with a `NULL` value as `conn` nothing happens. */
-void client_process(netconn_t *conn);
+ * If executed with a `NULL` value as `__conn` nothing happens. */
+void client_process(netconn_t **__conn);
 /* Disconnects the client.
  * After called, eventually `ondisconnect` event will be triggered. */
 void client_disconnect(netconn_t *conn);
@@ -161,5 +169,9 @@ uint16_t 		server_cli_get_port(netsrvclient_t *client);
 /* return a pointer to the internal array containing the address of the `client` represented as a string */
 char 			*server_cli_get_addrstr(netsrvclient_t *client);
 
+uint16_t 	server_cli_get_external_tick(netsrvclient_t *client);
+uint16_t 	client_get_external_tick(netconn_t *conn);
+uint16_t 	conn_get_local_tick(netconn_t *conn);
+/* return a pointer to the internal netstats struct */
 const struct netstats *conn_get_stats(netconn_t *conn);
 #endif
