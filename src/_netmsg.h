@@ -38,3 +38,4 @@ struct msg_handle *msghandle_init(void);
 void msghandle_free(struct msg_handle **h);
 void msg_onreceive_process(packet_t *p_in, struct msg_handle *hmsg, netconn_t *conn, void *userdata, struct srvevents *srvevents, struct clievents *clievents, netsrvclient_t *client);
 void msg_onsend_process(packet_t *p_out, struct msg_handle *hmsg);
+uint32_t message_send(struct msg_handle *hmsg, const void *buffer, const uint32_t size);

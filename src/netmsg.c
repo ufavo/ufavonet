@@ -93,7 +93,9 @@ msghandle_free(struct msg_handle **h)
 			head->prev = msg->prev; \
 		} \
 	} \
-	msg->next = msg->prev = NULL;
+	if (msg != NULL) { \
+		msg->next = msg->prev = NULL; \
+	}
 
 #define LL_ADD(head,msg) \
 	msg->next = head; \
@@ -214,7 +216,7 @@ msg_onsend_process(packet_t *p_out, struct msg_handle *hmsg)
 	hmsg->recv_count = 0;
 }
 
-int
+uint32_t
 message_send(struct msg_handle *hmsg, const void *buffer, const uint32_t size)
 {
 	if (hmsg->current == NULL) {

@@ -265,6 +265,7 @@ client_init(in_addr_t ip, in_port_t port, const struct clievents events, const s
 	/* prepare first packet */
 	packet_w_16_t(conn->out_packet, &conn->local_tick);
 	packet_w_bits(conn->out_packet, conn->data.cli.common.msg, MESSAGE_SIZE_BITS_CLI);
+	conn->data.cli.events.onconnect(conn, conn->userdata, conn->in_packet, conn->out_packet);
 	return conn;
 }
 
@@ -689,6 +690,22 @@ server_cli_get_external_tick(netsrvclient_t *client)
 	if (!SRV_CLIENT_ISCONNECTED(client))
 		return 0;
 	return client->common.cur_remote_tick;
+}
+
+uint32_t
+client_sendmessage(netconn_t *conn, const void *buffer, const uint32_t size)
+{
+	if (conn == NULL)
+		return 0;
+	return message_send(conn->data.cli.msghandle, buffer, size);
+}
+
+uint32_t
+server_cli_sendmessage(netsrvclient_t *client, const void *buffer, const uint32_t size)
+{
+	if (client == NULL)
+		return 0;
+	return message_send(client->msghandle, buffer, size);
 }
 
 uint16_t
