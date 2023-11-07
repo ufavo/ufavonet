@@ -69,7 +69,7 @@ struct packet
 	int 		bits_index;
 }; 
 
-packet_t *
+inline packet_t *
 packet_init(void)
 {
 	packet_t *p = malloc(sizeof(packet_t));
@@ -80,7 +80,7 @@ packet_init(void)
 	return p;
 }
 
-packet_t *
+inline packet_t *
 packet_init_from_buff(void *buff, const size_t size)
 {
 	packet_t *p = packet_init();
@@ -93,7 +93,7 @@ packet_init_from_buff(void *buff, const size_t size)
 	return p;
 }
 
-packet_t *
+inline packet_t *
 packet_init_from_buffcpy(const void *buff, const size_t size)
 {
 	packet_t *p = packet_init();
@@ -111,7 +111,7 @@ packet_init_from_buffcpy(const void *buff, const size_t size)
 	return p;
 }
 
-int
+inline int
 packet_free(packet_t **p)
 {
 	NULLCHECK(p);
@@ -124,7 +124,7 @@ packet_free(packet_t **p)
 	return 0;
 }
 
-int
+inline int
 packet_rewind(packet_t *p)
 {
 	NULLCHECK(p)
@@ -135,21 +135,21 @@ packet_rewind(packet_t *p)
 	return 0;
 }
 
-uint32_t
+inline uint32_t
 packet_get_length(packet_t *p)
 {
 	NULLCHECK(p);
 	return p->length;
 }
 
-size_t
+inline size_t
 packet_get_buffsize(packet_t *p)
 {
 	NULLCHECK(p);
 	return p->size;
 }
 
-void *
+inline void *
 packet_get_buff(packet_t *p)
 {
 	if (p == NULL)
@@ -157,7 +157,7 @@ packet_get_buff(packet_t *p)
 	return p->data;
 }
 
-int
+inline int
 packet_set_buff(packet_t *p, void *buff, const size_t size)
 {
 	NULLCHECK(p);
@@ -179,14 +179,14 @@ packet_set_buff(packet_t *p, void *buff, const size_t size)
 	return 0;
 }
 
-uint32_t
+inline uint32_t
 packet_get_index(packet_t *p)
 {
 	NULLCHECK(p);
 	return p->index;
 }
 
-int
+inline int
 packet_set_length(packet_t *p, const uint32_t value)
 {
 	NULLCHECK(p);
@@ -197,14 +197,14 @@ packet_set_length(packet_t *p, const uint32_t value)
 	return 0;
 }
 
-uint32_t
+inline uint32_t
 packet_get_readable(packet_t *p)
 {
 	NULLCHECK(p);
 	return p->length - p->index; 
 }
 
-int
+inline int
 packet_w(packet_t *p, const void *ptr, const size_t size)
 {
 	NULLCHECK(p);
@@ -247,34 +247,34 @@ packet_w(packet_t *p, const void *ptr, const size_t size)
 }
 
 
-int
+inline int
 packet_w_64_t(packet_t *p, const void *ptr)
 {
 	int64_t ivalue = htonll(*((int64_t*)ptr));
 	return packet_w(p, &ivalue, sizeof(int64_t));
 }
 
-int
+inline int
 packet_w_32_t(packet_t *p, const void *ptr)
 {
 	int32_t ivalue = htonl(*((int32_t*)ptr));
 	return packet_w(p, &ivalue, sizeof(int32_t));
 }
 
-int
+inline int
 packet_w_16_t(packet_t *p, const void *ptr)
 {
 	int16_t ivalue = htons(*(int16_t*)ptr);
 	return packet_w(p, &ivalue, sizeof(int16_t));
 }
 
-int
+inline int
 packet_w_8_t(packet_t *p, const void *ptr)
 {
 	return packet_w(p, ptr, sizeof(int8_t));
 }
 
-int
+inline int
 packet_w_bits(packet_t *p, const uint8_t src, const int n)
 {
 	NULLCHECK(p);
@@ -316,7 +316,7 @@ packet_w_bits(packet_t *p, const uint8_t src, const int n)
 	return 0;
 }
 
-int
+inline int
 packet_r_bits(packet_t *p, uint8_t *ptr, const int n)
 {
 	NULLCHECK(p);
@@ -350,7 +350,7 @@ packet_r_bits(packet_t *p, uint8_t *ptr, const int n)
 	return 0;
 }
 
-int
+inline int
 packet_w_vlen29(packet_t *p, const uint32_t value)
 {
 	NULLCHECK(p);
@@ -381,7 +381,7 @@ packet_w_vlen29(packet_t *p, const uint32_t value)
 	return 0;
 }
 
-int
+inline int
 packet_r(packet_t *p, void *ptr, const size_t size)
 {
 	NULLCHECK(p);
@@ -394,7 +394,7 @@ packet_r(packet_t *p, void *ptr, const size_t size)
 	return 0;
 }
 
-int
+inline int
 packet_r_64_t(packet_t *p, void *ptr)
 {
 	NULLCHECK(p);
@@ -405,7 +405,7 @@ packet_r_64_t(packet_t *p, void *ptr)
 	return 0;
 }
 
-int
+inline int
 packet_r_32_t(packet_t *p, void *ptr)
 {
 	NULLCHECK(p);
@@ -416,7 +416,7 @@ packet_r_32_t(packet_t *p, void *ptr)
 	return 0;
 }
 
-int
+inline int
 packet_r_16_t(packet_t *p, void *ptr)
 {
 	NULLCHECK(p);
@@ -427,13 +427,13 @@ packet_r_16_t(packet_t *p, void *ptr)
 	return 0;
 }
 
-int
+inline int
 packet_r_8_t(packet_t *p, void *ptr)
 {
 	return packet_r(p, ptr, sizeof(uint8_t));
 }
 
-int
+inline int
 packet_r_vlen29(packet_t *p, uint32_t *ptr)
 {
 	uint32_t	value = 0;
@@ -460,7 +460,7 @@ packet_r_vlen29(packet_t *p, uint32_t *ptr)
 	return 0;
 }
 
-int
+inline int
 packet_skip(packet_t *p, const size_t size)
 {
 	NULLCHECK(p);
@@ -469,7 +469,7 @@ packet_skip(packet_t *p, const size_t size)
 	return 0;
 }
 
-int
+inline int
 packet_skip_bits(packet_t *p, const int n)
 {
 	NULLCHECK(p);
@@ -486,14 +486,14 @@ packet_skip_bits(packet_t *p, const int n)
 	return 0;
 }
 
-int
+inline int
 packet_skip_vlen29(packet_t *p)
 {
 	uint32_t dummy;
 	return packet_r_vlen29(p, &dummy);
 }
 
-int
+inline int
 packet_rw_packet(packet_t *p_from, packet_t *p_to, const size_t size)
 {
 	NULLCHECK(p_from);

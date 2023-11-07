@@ -47,7 +47,7 @@
 
 #include "../modules/uthash/src/uthash.h"
 
-#include "_netmsg.h"
+#include "netmsg.h"
 
 
 enum network_message

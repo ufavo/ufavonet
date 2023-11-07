@@ -18,6 +18,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#ifndef _netmsg_h_
+#define _netmsg_h_
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,11 +29,24 @@
 #include "../include/packet.h"
 #include "../include/net.h"
 
-#include "_netmsg.h"
+struct message {
+	struct message 	*next, *prev;
+	packet_t 		*packet;
+	int 			submsg_count;
+	uint8_t 		id;
+	uint32_t 		iid;
+};
+
+struct msg_handle {
+	struct message 	*send, *pool, *queue, *current;
+	uint8_t 		last_recv, last_id, last_ack, send_count, recv_count;
+	uint32_t 		pool_count, queue_count, last_iid;
+	packet_t 		*msg_read_pkt;
+};
 
 #define SENDCOUNTMAX 128
 
-struct msg_handle *
+static inline struct msg_handle *
 msghandle_init()
 {
 	struct msg_handle *hmsg = malloc(sizeof(struct msg_handle));
@@ -58,7 +74,7 @@ msghandle_init()
 		msg = msg2; \
 	}
 
-void
+static inline void
 msghandle_free(struct msg_handle **h)
 {
 	struct message *msg, *msg2;
@@ -115,7 +131,7 @@ msghandle_free(struct msg_handle **h)
 	} \
 	head->prev = msg;
 
-void
+static inline void
 msg_onreceive_process(packet_t *p_in, struct msg_handle *hmsg, netconn_t *conn, void *userdata, struct srvevents *srvevents, struct clievents *clievents, netsrvclient_t *client)
 {
 	struct message 	*msg, *msg2;
@@ -188,7 +204,7 @@ msg_onreceive_process(packet_t *p_in, struct msg_handle *hmsg, netconn_t *conn, 
 	}
 }
 
-void
+static inline void
 msg_onsend_process(packet_t *p_out, struct msg_handle *hmsg)
 {
 	struct message 	*msg;
@@ -215,7 +231,7 @@ msg_onsend_process(packet_t *p_out, struct msg_handle *hmsg)
 	hmsg->recv_count = 0;
 }
 
-uint32_t
+static inline uint32_t
 message_send(struct msg_handle *hmsg, const void *buffer, const uint32_t size)
 {
 	if (hmsg->current == NULL) {
@@ -251,3 +267,4 @@ message_send(struct msg_handle *hmsg, const void *buffer, const uint32_t size)
 
 	return hmsg->current->iid;
 }
+#endif
