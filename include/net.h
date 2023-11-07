@@ -21,6 +21,24 @@
 #ifndef __UFAVONET_NET_HEADER__
 #define __UFAVONET_NET_HEADER__
 
+#ifdef _WIN32
+typedef unsigned long in_addr_t;
+typedef unsigned short in_port_t;
+typedef int socklen_t;
+#include <winsock2.h>
+#define INITIALIZE_WINSOCKS() \
+    WSADATA wsa; \
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { \
+        printf("Failed to initialize Winsock.\n"); \
+        return 1; \
+    }
+#define CLEANUP_WINSOCKS() WSACleanup() 
+#else
+#include <arpa/inet.h>
+#define INITIALIZE_WINSOCKS()
+#define CLEANUP_WINSOCKS()
+#endif
+
 /* 2^3 = max 8 values */
 static const int network_kick_bit_size = 3;
 enum netconn_kick_reason

@@ -22,14 +22,24 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
+#include <sys/types.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#define SOCKET_INVALID (int)INVALID_SOCKET
+#define SOCKETWOULDBLOCK (WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == WSAEINVAL)
+#else
+#define SOCKET_INVALID -1
+#define SOCKET_ERROR -1
+#define SOCKETWOULDBLOCK (errno == EAGAIN || errno == EWOULDBLOCK)
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <stdio.h>
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <fcntl.h>
+#endif
 #include <errno.h>
 
 #include "../include/packet.h"
@@ -122,6 +132,9 @@ struct netconn {
 void
 diep(char *s)
 {
+	#ifdef _WIN32
+	printf("WSAERROR=%d\n", WSAGetLastError());
+	#endif
 	perror(s);
 	exit(1);
 }
@@ -149,25 +162,33 @@ server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const s
 {
 	netconn_t 				*conn = malloc(sizeof(netconn_t));
 	struct sockaddr_in 		sockaddr_server = {0};
-	int 					flags;
-
 
 	/* obtain socket */
-	if ( (conn->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1 ) {
+	if ( (conn->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_INVALID ) {
 		diep("socket");
 		free(conn);
 		return NULL;
 	}
-	
-	/* set fd as non blocking */
-	flags = fcntl(conn->fd, F_GETFL);
+
+	/* set fd as non-blocking */
+#ifdef _WIN32
+	u_long mode = 1;
+	if (ioctlsocket(conn->fd, FIONBIO, &mode) == SOCKET_ERROR) {
+		diep("ioctlsocket");
+		free(conn);
+		return NULL;
+	}
+#else	
+	int flags = fcntl(conn->fd, F_GETFL);
 	fcntl(conn->fd, F_SETFL, flags | O_NONBLOCK);
+#endif
 
 	/* bind */
 	sockaddr_server.sin_family = AF_INET; /* IPv4 */
 	sockaddr_server.sin_port = port;
 	sockaddr_server.sin_addr.s_addr = ip;
-	if ( bind(conn->fd, (struct sockaddr *)&sockaddr_server, sizeof(sockaddr_server)) == -1) {
+
+	if ( bind(conn->fd, (struct sockaddr *)&sockaddr_server, sizeof(sockaddr_server)) == SOCKET_ERROR) {
 		diep("bind");
 		free(conn);
 		return NULL;
@@ -202,7 +223,11 @@ server_free(netconn_t **conn)
 			SRVCLIENT_FREE(c, tmpcli, client, EKICK_SERVER_CLOSING);
 		}
 	}
+#ifdef _WIN32
+	closesocket(c->fd);
+#else
 	close(c->fd);
+#endif
 	packet_free(&c->in_packet);
 	packet_free(&c->out_packet);
 	free(c);
@@ -218,7 +243,11 @@ client_free(netconn_t **conn)
 		return;
 
 	netconn_t 			*c = *conn;
+#ifdef _WIN32
+	closesocket(c->fd);
+#else
 	close(c->fd);
+#endif
 	packet_free(&c->in_packet);
 	packet_free(&c->out_packet);
 	msghandle_free(&c->data.cli.msghandle);	
@@ -231,21 +260,29 @@ netconn_t *
 client_init(in_addr_t ip, in_port_t port, const struct clievents events, const struct netsettings settings, void *userdata)
 {
 	netconn_t 	*conn = malloc(sizeof(netconn_t));
-	int 		flags;
 	
 	static const struct sockaddr_in emptyaddr = {0};
 	conn->data.cli.sockaddr_server = emptyaddr;
 
-	if ( (conn->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1 ) {
+	if ( (conn->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_INVALID ) {
 		diep("socket");
 		free(conn);
 		return NULL;
 	}
-	
-	/* set fd as non blocking */
-	flags = fcntl(conn->fd, F_GETFL);
+
+	/* set fd as non-blocking */
+#ifdef _WIN32
+	u_long mode = 1;
+	if (ioctlsocket(conn->fd, FIONBIO, &mode) == SOCKET_ERROR) {
+		diep("ioctlsocket");
+		free(conn);
+		return NULL;
+	}
+#else
+	int flags = fcntl(conn->fd, F_GETFL);
 	fcntl(conn->fd, F_SETFL, flags | O_NONBLOCK);
-	
+#endif
+
 	/* initialize cli specific stuff */
 	conn->data.cli.sockaddr_server.sin_family = AF_INET;
 	conn->data.cli.sockaddr_server.sin_port = port;
@@ -271,8 +308,8 @@ client_init(in_addr_t ip, in_port_t port, const struct clievents events, const s
 
 #define SENDTO(fd,buff,length,sockaddr_in,socklen) \
 	conn->stats.total_sent_bytes += length; \
-	if (sendto(fd, buff, length, 0, (struct sockaddr *)&sockaddr_in, socklen) == -1) { \
-		if (errno == EAGAIN || errno == EWOULDBLOCK) { \
+	if (sendto(fd, (const char *)buff, length, 0, (struct sockaddr *)&sockaddr_in, socklen) == -1) { \
+		if (SOCKETWOULDBLOCK) { \
 			/* OS or network cant keep up (tick rate too high / too many clients / low network bandwidth). */ \
 			fprintf(stderr,"sendto would block. OS or network can't keep up\n"); \
 		} else { \
@@ -325,8 +362,8 @@ server_process(netconn_t **__conn)
 
 	/* Receive data from clients */
 	while(1) {
-		if ( (recvlen = recvfrom(conn->fd, conn->in_buffer, SERVER_BUFFER_LEN, 0, (struct sockaddr *)&sockaddr_client, &socklen)) == -1 ) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+		if ( (recvlen = recvfrom(conn->fd, (char *)conn->in_buffer, SERVER_BUFFER_LEN, 0, (struct sockaddr *)&sockaddr_client, &socklen)) == SOCKET_ERROR ) {
+			if (SOCKETWOULDBLOCK) {
 				/* no more datagrams */
 				break;
 			}
@@ -585,8 +622,8 @@ client_process(netconn_t **__conn)
 	}
 
 	while(1) {
-		if ( (recvlen = recvfrom(conn->fd, conn->in_buffer, SERVER_BUFFER_LEN, 0, (struct sockaddr *)&conn->data.cli.sockaddr_server, &socklen)) == -1 ) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+		if ( (recvlen = recvfrom(conn->fd, (char *)conn->in_buffer, SERVER_BUFFER_LEN, 0, (struct sockaddr *)&conn->data.cli.sockaddr_server, &socklen)) == SOCKET_ERROR ) {
+			if (SOCKETWOULDBLOCK) {
 				/* no more datagrams */
 				break;
 			}

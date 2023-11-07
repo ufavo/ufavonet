@@ -22,7 +22,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <arpa/inet.h>
 
 #include "../include/packet.h"
 #include "../include/net.h"
