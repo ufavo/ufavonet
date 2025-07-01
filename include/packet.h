@@ -78,7 +78,8 @@ int packet_set_length(packet_t *p, const uint32_t value);
 int packet_set_size(packet_t *p, const size_t size);
 /* Returns `0` if `p` is `NULL`. Otherwise returns the amount of data available for reading, in bytes. */
 uint32_t packet_get_readable(packet_t *p);
-
+/* Returns the number of write operations performed on the packet since the last rewind/init */
+uint32_t packet_get_write_op_count(packet_t *p);
 
 
 /* Adds `size` bytes from `ptr` to `p`.

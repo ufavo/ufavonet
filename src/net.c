@@ -120,6 +120,7 @@ struct netconn {
 	int 				fd;
 
 	uint16_t 			local_tick;
+	uint16_t 			send_skip_count;
 	struct netstats 	stats;
 	struct netsettings 	settings;
 	union {
@@ -510,8 +511,17 @@ send_process:
 		} else {
 			/* Is a connected client. Call onsend */
 			client->common.expected_remote_tick++;
-			msg_onsend_process(conn->out_packet, client->msghandle);
+			const uint8_t msg_did_work = msg_onsend_process(conn->out_packet, client->msghandle);
+			const uint32_t internal_w_op_cnt = packet_get_write_op_count(conn->out_packet);
 			conn->data.srv.events.onsendpkt(conn, conn->userdata, conn->out_packet, client, client->userdata);
+			if (packet_get_write_op_count(conn->out_packet) == internal_w_op_cnt && !msg_did_work) {
+				/* avoid sending the empty packet if possible */
+				if (conn->send_skip_count < conn->settings.timeout_tick / 8) {
+					conn->send_skip_count++;
+					goto next_send_iter;
+				}
+				conn->send_skip_count = 0;
+			}
 		}
 		SENDTO(conn->fd,conn->out_buffer, packet_get_length(conn->out_packet), client->sockaddr, socklen);
 next_send_iter:
@@ -696,11 +706,21 @@ applypacket:
 	packet_w_bits(conn->out_packet, conn->data.cli.common.msg, MESSAGE_SIZE_BITS_CLI);
 	/* call onsend */
 	if (conn->data.cli.common.msg != CLI_NOTICE_DISCONNECT) {
-		msg_onsend_process(conn->out_packet, conn->data.cli.msghandle);
+		const uint8_t msg_did_work = msg_onsend_process(conn->out_packet, conn->data.cli.msghandle);
+		const uint32_t internal_w_op_cnt = packet_get_write_op_count(conn->out_packet);
 		conn->data.cli.events.onsendpkt(conn, conn->userdata, conn->out_packet);
+		if (packet_get_write_op_count(conn->out_packet) == internal_w_op_cnt && !msg_did_work) {
+			/* avoid sending the empty packet if possible */
+			if (conn->send_skip_count < conn->settings.timeout_tick / 8) {
+				conn->send_skip_count++;
+				goto skip_send_pkt;
+			}
+			conn->send_skip_count = 0;
+		}
 	}
 send_pkt:
 	SENDTO(conn->fd, conn->out_buffer, packet_get_length(conn->out_packet), conn->data.cli.sockaddr_server, socklen);
+skip_send_pkt:
 	conn->data.cli.common.expected_remote_tick++;
 	conn->local_tick++;
 	if (conn->data.cli.common.n_local_tick_noresp == conn->settings.timeout_tick) {

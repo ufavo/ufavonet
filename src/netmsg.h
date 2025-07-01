@@ -204,7 +204,7 @@ msg_onreceive_process(packet_t *p_in, struct msg_handle *hmsg, netconn_t *conn, 
 	}
 }
 
-static inline void
+static inline uint8_t
 msg_onsend_process(packet_t *p_out, struct msg_handle *hmsg)
 {
 	struct message 	*msg;
@@ -213,7 +213,7 @@ msg_onsend_process(packet_t *p_out, struct msg_handle *hmsg)
 	if (hmsg->send_count == 0 && hmsg->recv_count == 0) {
 		/* nothing to send/acknowledge */
 		packet_w_bits(p_out, 0, 1);
-		return;
+		return 0;
 	}
 	packet_w_bits(p_out, 1, 1);
 
@@ -229,6 +229,7 @@ msg_onsend_process(packet_t *p_out, struct msg_handle *hmsg)
 	}
 
 	hmsg->recv_count = 0;
+	return 1;
 }
 
 static inline uint32_t

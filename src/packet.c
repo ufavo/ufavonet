@@ -54,19 +54,21 @@
 	p->length = 0; \
 	p->realloc_allowed = 1; \
 	p->bits_byte = NULL; \
-	p->bits_index = 0;
+	p->bits_index = 0; \
+	p->write_op_count = 0;
 
 
 struct packet
 {
 	uint32_t	index;
+	uint32_t 	length;
 	uint8_t 	*data;
 	size_t		size;
-	uint32_t 	length;
+	uint32_t 	write_op_count;
 	uint8_t 	realloc_allowed;
 
+	uint8_t 	bits_index;
 	uint8_t 	*bits_byte;
-	int 		bits_index;
 }; 
 
 inline packet_t *
@@ -131,6 +133,7 @@ packet_rewind(packet_t *p)
 	p->index = 0;
 	p->bits_byte = NULL;
 	p->bits_index = 0;
+	p->write_op_count = 0;
 
 	return 0;
 }
@@ -204,6 +207,13 @@ packet_get_readable(packet_t *p)
 	return p->length - p->index; 
 }
 
+uint32_t
+packet_get_write_op_count(packet_t *p)
+{
+	NULLCHECK(p);
+	return p->write_op_count;
+}
+
 inline int
 packet_w(packet_t *p, const void *ptr, const size_t size)
 {
@@ -243,6 +253,7 @@ packet_w(packet_t *p, const void *ptr, const size_t size)
 	memcpy(p->data + p->index, ptr, size);
 	p->index += size;
 	p->length = p->index;
+	p->write_op_count++;
 	return 0;
 }
 
@@ -290,6 +301,7 @@ packet_w_bits(packet_t *p, const uint8_t src, const int n)
 		}
 		p->bits_byte = p->data + p->index - 1;
 		p->bits_index = 0;
+		p->write_op_count--;
 	} else if (p->bits_index + n > 8) {
 		WRITECHECK(p, 1);
 	}
@@ -309,10 +321,12 @@ packet_w_bits(packet_t *p, const uint8_t src, const int n)
 
 		p->bits_index -= 8;
 		*p->bits_byte |= masked >> (n - p->bits_index);
+		p->write_op_count--;
 	} else if (p->bits_index == 8) {
 		p->bits_byte = NULL;
 		p->bits_index = 0;
 	}
+	p->write_op_count++;
 	return 0;
 }
 
