@@ -48,14 +48,8 @@
 #define WRITECHECK(packet_ptr,sz) if ((packet_ptr)->index + sz >= (packet_ptr)->size && (packet_ptr)->realloc_allowed == 0) { return EPACKET_ERR_OUT_OF_BOUNDS; }
 
 #define RESETPACKET(p) \
-	p->data = NULL; \
-	p->size = 0; \
-	p->index = 0; \
-	p->length = 0; \
-	p->realloc_allowed = 1; \
-	p->bits_byte = NULL; \
-	p->bits_index = 0; \
-	p->write_op_count = 0;
+	memset(p, 0, sizeof(*p)); \
+	p->realloc_allowed = 1;
 
 
 struct packet
@@ -74,7 +68,7 @@ struct packet
 inline packet_t *
 packet_init(void)
 {
-	packet_t *p = malloc(sizeof(packet_t));
+	packet_t *p = malloc(sizeof(*p));
 	if (p == NULL) {
 		return NULL;
 	}

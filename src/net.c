@@ -164,6 +164,8 @@ server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const s
 	netconn_t 				*conn = malloc(sizeof(netconn_t));
 	struct sockaddr_in 		sockaddr_server = {0};
 
+	memset(conn, 0, sizeof(*conn));
+
 	/* obtain socket */
 	if ( (conn->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_INVALID ) {
 		diep("socket");
@@ -260,7 +262,8 @@ client_free(netconn_t **conn)
 netconn_t *
 client_init(in_addr_t ip, in_port_t port, const struct clievents events, const struct netsettings settings, void *userdata)
 {
-	netconn_t 	*conn = malloc(sizeof(netconn_t));
+	netconn_t 	*conn = malloc(sizeof(*conn));
+	memset(conn, 0, sizeof(*conn));
 	
 	static const struct sockaddr_in emptyaddr = {0};
 	conn->data.cli.sockaddr_server = emptyaddr;
