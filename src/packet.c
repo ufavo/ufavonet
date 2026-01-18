@@ -168,6 +168,15 @@ packet_get_index(packet_t *restrict p)
 	return p->index;
 }
 
+inline uint32_t
+packet_set_index(packet_t *restrict p, uint32_t index)
+{
+	if (index > p->length)
+		index = p->length;
+	p->index = index;
+	return index;
+}
+
 inline int
 packet_set_length(packet_t *restrict p, const uint32_t value)
 {

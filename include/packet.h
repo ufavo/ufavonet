@@ -68,6 +68,9 @@ void *packet_get_buff(packet_t *restrict p);
 int packet_set_buff(packet_t *restrict p, void *buff, const size_t size);
 /* Returns `0` if `p` is `NULL`. Otherwise returns the internal buffer index */
 uint32_t packet_get_index(packet_t *restrict p);
+/* Sets the current position of the internal buffer to `index` if the packet length >= `index`.
+ * Returns the set `index`. */
+uint32_t packet_set_index(packet_t *restrict p, uint32_t index);
 /* Sets how much readable data this packet contains, in bytes.
  * `value` cannot exceed buffer size. 
  * Returns `enum packeterr` error code. */
