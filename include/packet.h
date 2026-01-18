@@ -56,17 +56,17 @@ int packet_free(packet_t *restrict *p);
 int packet_rewind(packet_t *restrict p);
 
 
-/* Returns `0` if `p` is `NULL`. Otherwise returns how much readable data this packet contains, in bytes. */
+/* Returns how much readable data this packet contains, in bytes. */
 uint32_t packet_get_length(packet_t *restrict p);
-/* Returns `0` if `p` is `NULL`. Otherwise returns the size of the internal buffer. */
+/* Returns the size of the internal buffer. */
 size_t packet_get_buffsize(packet_t *restrict p);
-/* Returns `NULL` if `p` is `NULL`. Otherwise returns the pointer to the internal buffer. */
+/* Returns the pointer to the internal buffer. */
 void *packet_get_buff(packet_t *restrict p);
 /* Sets the internal buffer pointer to `buff` of `size` and rewinds the packet.
  * Passing `NULL` to `buff` resets the packet, as if it was just initialized with `packet_init`.
  * Returns `enum packeterr` error code. */
 int packet_set_buff(packet_t *restrict p, void *buff, const size_t size);
-/* Returns `0` if `p` is `NULL`. Otherwise returns the internal buffer index */
+/* Returns the internal buffer index */
 uint32_t packet_get_index(packet_t *restrict p);
 /* Sets the current position of the internal buffer to `index` if the packet length >= `index`.
  * Returns the set `index`. */
@@ -81,7 +81,7 @@ int packet_set_length(packet_t *restrict p, const uint32_t value);
  * If the size is smaller then before, data loss may occour.
  * Returns `EPACKET_ERR_NOT_ALLOWED` if the packet was not initialized with `packet_init_from_buff`. */
 int packet_set_size(packet_t *restrict p, const size_t size);
-/* Returns `0` if `p` is `NULL`. Otherwise returns the amount of data available for reading, in bytes. */
+/* Returns the amount of data available for reading, in bytes. */
 uint32_t packet_get_readable(packet_t *restrict p);
 /* Returns the number of write operations performed on the packet since the last rewind/init */
 uint32_t packet_get_write_op_count(packet_t *restrict p);
