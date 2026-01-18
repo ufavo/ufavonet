@@ -85,7 +85,7 @@ packet_init_from_buff(void *buff, const size_t size)
 }
 
 inline packet_t *
-packet_init_from_buffcpy(const void *buff, const size_t size)
+packet_init_from_buffcpy(const void *restrict buff, const size_t size)
 {
 	packet_t *p = packet_init();
 	if (!p) return NULL;
@@ -101,7 +101,7 @@ packet_init_from_buffcpy(const void *buff, const size_t size)
 }
 
 inline int
-packet_free(packet_t **p)
+packet_free(packet_t *restrict *p)
 {
 	if (!p) return EPACKET_ERR_NULL;
 	if (!*p) return EPACKET_ERR_NULL;
@@ -113,7 +113,7 @@ packet_free(packet_t **p)
 }
 
 inline int
-packet_rewind(packet_t *p)
+packet_rewind(packet_t *restrict p)
 {
 	p->index = 0;
 	p->bits_byte = NULL;
@@ -124,25 +124,25 @@ packet_rewind(packet_t *p)
 }
 
 inline uint32_t
-packet_get_length(packet_t *p)
+packet_get_length(packet_t *restrict p)
 {
 	return p->length;
 }
 
 inline size_t
-packet_get_buffsize(packet_t *p)
+packet_get_buffsize(packet_t *restrict p)
 {
 	return p->size;
 }
 
 inline void *
-packet_get_buff(packet_t *p)
+packet_get_buff(packet_t *restrict p)
 {
 	return p->data;
 }
 
 inline int
-packet_set_buff(packet_t *p, void *buff, const size_t size)
+packet_set_buff(packet_t *restrict p, void *buff, const size_t size)
 {
 	if (buff == NULL) {
 		if (p->realloc_allowed == 1) {
@@ -163,13 +163,13 @@ packet_set_buff(packet_t *p, void *buff, const size_t size)
 }
 
 inline uint32_t
-packet_get_index(packet_t *p)
+packet_get_index(packet_t *restrict p)
 {
 	return p->index;
 }
 
 inline int
-packet_set_length(packet_t *p, const uint32_t value)
+packet_set_length(packet_t *restrict p, const uint32_t value)
 {
 	if (value > p->size) return EPACKET_ERR_OUT_OF_BOUNDS;
 	p->length = value;
@@ -177,19 +177,19 @@ packet_set_length(packet_t *p, const uint32_t value)
 }
 
 inline uint32_t
-packet_get_readable(packet_t *p)
+packet_get_readable(packet_t *restrict p)
 {
 	return p->length - p->index; 
 }
 
 uint32_t
-packet_get_write_op_count(packet_t *p)
+packet_get_write_op_count(packet_t *restrict p)
 {
 	return p->write_op_count;
 }
 
 inline int
-packet_w(packet_t *p, const void *ptr, const size_t size)
+packet_w(packet_t *restrict p, const void *restrict ptr, const size_t size)
 {
 	if (!size) return 0;
 
@@ -231,34 +231,34 @@ packet_w(packet_t *p, const void *ptr, const size_t size)
 
 
 inline int
-packet_w_64_t(packet_t *p, const void *ptr)
+packet_w_64_t(packet_t *restrict p, const void *restrict ptr)
 {
 	int64_t ivalue = htonll(*((int64_t*)ptr));
 	return packet_w(p, &ivalue, sizeof(int64_t));
 }
 
 inline int
-packet_w_32_t(packet_t *p, const void *ptr)
+packet_w_32_t(packet_t *restrict p, const void *restrict ptr)
 {
 	int32_t ivalue = htonl(*((int32_t*)ptr));
 	return packet_w(p, &ivalue, sizeof(int32_t));
 }
 
 inline int
-packet_w_16_t(packet_t *p, const void *ptr)
+packet_w_16_t(packet_t *restrict p, const void *restrict ptr)
 {
 	int16_t ivalue = htons(*(int16_t*)ptr);
 	return packet_w(p, &ivalue, sizeof(int16_t));
 }
 
 inline int
-packet_w_8_t(packet_t *p, const void *ptr)
+packet_w_8_t(packet_t *restrict p, const void *restrict ptr)
 {
 	return packet_w(p, ptr, sizeof(int8_t));
 }
 
 inline int
-packet_w_bits(packet_t *p, const uint8_t src, const int n)
+packet_w_bits(packet_t *restrict p, const uint8_t src, const int n)
 {
 	uint16_t 	masked;
 	uint8_t 	t;
@@ -301,7 +301,7 @@ packet_w_bits(packet_t *p, const uint8_t src, const int n)
 }
 
 inline int
-packet_r_bits(packet_t *p, uint8_t *ptr, const int n)
+packet_r_bits(packet_t *restrict p, uint8_t *restrict ptr, const int n)
 {
 	if (n <= 0 || n > 8) return EPACKET_ERR_OUT_OF_BOUNDS;
 
@@ -333,7 +333,7 @@ packet_r_bits(packet_t *p, uint8_t *ptr, const int n)
 }
 
 inline int
-packet_w_vlen29(packet_t *p, const uint32_t value)
+packet_w_vlen29(packet_t *restrict p, const uint32_t value)
 {
 	uint8_t buffer[] = {0,0,0,0};
 
@@ -362,7 +362,7 @@ packet_w_vlen29(packet_t *p, const uint32_t value)
 }
 
 inline int
-packet_r(packet_t *p, void *ptr, const size_t size)
+packet_r(packet_t *restrict p, void *restrict ptr, const size_t size)
 {
 	if (!size) return 0;
 
@@ -373,7 +373,7 @@ packet_r(packet_t *p, void *ptr, const size_t size)
 }
 
 inline int
-packet_r_64_t(packet_t *p, void *ptr)
+packet_r_64_t(packet_t *restrict p, void *restrict ptr)
 {
 	READCHECK(p, sizeof(int64_t));
 	int64_t result = (int64_t)ntohll(*(int64_t *)(p->data + p->index));
@@ -383,7 +383,7 @@ packet_r_64_t(packet_t *p, void *ptr)
 }
 
 inline int
-packet_r_32_t(packet_t *p, void *ptr)
+packet_r_32_t(packet_t *restrict p, void *restrict ptr)
 {
 	READCHECK(p, sizeof(int32_t));
 	int32_t result = (int32_t)ntohl(*(int32_t *)(p->data + p->index));
@@ -393,7 +393,7 @@ packet_r_32_t(packet_t *p, void *ptr)
 }
 
 inline int
-packet_r_16_t(packet_t *p, void *ptr)
+packet_r_16_t(packet_t *restrict p, void *restrict ptr)
 {
 	READCHECK(p, sizeof(int16_t));
 	int16_t result = (int16_t)ntohs(*(int16_t *)(p->data + p->index));
@@ -403,13 +403,13 @@ packet_r_16_t(packet_t *p, void *ptr)
 }
 
 inline int
-packet_r_8_t(packet_t *p, void *ptr)
+packet_r_8_t(packet_t *restrict p, void *restrict ptr)
 {
 	return packet_r(p, ptr, sizeof(uint8_t));
 }
 
 inline int
-packet_r_vlen29(packet_t *p, uint32_t *ptr)
+packet_r_vlen29(packet_t *restrict p, uint32_t *restrict ptr)
 {
 	uint32_t	value = 0;
 	uint8_t		byte = 0;
@@ -436,7 +436,7 @@ packet_r_vlen29(packet_t *p, uint32_t *ptr)
 }
 
 inline int
-packet_skip(packet_t *p, const size_t size)
+packet_skip(packet_t *restrict p, const size_t size)
 {
 	READCHECK(p, size);
 	p->index += size;
@@ -444,7 +444,7 @@ packet_skip(packet_t *p, const size_t size)
 }
 
 inline int
-packet_skip_bits(packet_t *p, const int n)
+packet_skip_bits(packet_t *restrict p, const int n)
 {
 	if (n <= 0 || n > 8) return EPACKET_ERR_OUT_OF_BOUNDS;
 
@@ -459,14 +459,14 @@ packet_skip_bits(packet_t *p, const int n)
 }
 
 inline int
-packet_skip_vlen29(packet_t *p)
+packet_skip_vlen29(packet_t *restrict p)
 {
 	uint32_t dummy;
 	return packet_r_vlen29(p, &dummy);
 }
 
 inline int
-packet_rw_packet(packet_t *p_from, packet_t *p_to, const size_t size)
+packet_rw_packet(packet_t *restrict p_from, packet_t *restrict p_to, const size_t size)
 {
 	READCHECK(p_from, size);
 
