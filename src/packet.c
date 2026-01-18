@@ -42,7 +42,6 @@
 #endif
 
 
-#define NULLCHECK(packet_ptr) if ((packet_ptr) == NULL) { return EPACKET_ERR_NULL; }
 /* index is always one position ahead, so instead subtracting one in the comparision below, we just check if it's greater then */
 #define READCHECK(packet_ptr,size) if ((packet_ptr)->index + size > (packet_ptr)->length) { return EPACKET_ERR_OUT_OF_BOUNDS; }
 #define WRITECHECK(packet_ptr,sz) if ((packet_ptr)->index + sz >= (packet_ptr)->size && (packet_ptr)->realloc_allowed == 0) { return EPACKET_ERR_OUT_OF_BOUNDS; }
@@ -69,9 +68,7 @@ inline packet_t *
 packet_init(void)
 {
 	packet_t *p = malloc(sizeof(*p));
-	if (p == NULL) {
-		return NULL;
-	}
+	if (!p) return NULL;
 	RESETPACKET(p);
 	return p;
 }
@@ -80,9 +77,7 @@ inline packet_t *
 packet_init_from_buff(void *buff, const size_t size)
 {
 	packet_t *p = packet_init();
-	if (p == NULL) {
-		return NULL;
-	}
+	if (!p) return NULL;
 	p->data = buff;
 	p->size = size;
 	p->realloc_allowed = 0;
@@ -93,9 +88,7 @@ inline packet_t *
 packet_init_from_buffcpy(const void *buff, const size_t size)
 {
 	packet_t *p = packet_init();
-	if (p == NULL) {
-		return NULL;
-	}
+	if (!p) return NULL;
 	p->data = malloc(size);
 	if (p->data == NULL) {
 		free(p);
@@ -110,11 +103,10 @@ packet_init_from_buffcpy(const void *buff, const size_t size)
 inline int
 packet_free(packet_t **p)
 {
-	NULLCHECK(p);
-	NULLCHECK(*p);
-	if ((*p)->realloc_allowed == 1) {
+	if (!p) return EPACKET_ERR_NULL;
+	if (!*p) return EPACKET_ERR_NULL;
+	if ((*p)->realloc_allowed == 1)
 		free((*p)->data);
-	}
 	free(*p);
 	*p = NULL;
 	return 0;
@@ -123,7 +115,6 @@ packet_free(packet_t **p)
 inline int
 packet_rewind(packet_t *p)
 {
-	NULLCHECK(p)
 	p->index = 0;
 	p->bits_byte = NULL;
 	p->bits_index = 0;
@@ -135,29 +126,24 @@ packet_rewind(packet_t *p)
 inline uint32_t
 packet_get_length(packet_t *p)
 {
-	NULLCHECK(p);
 	return p->length;
 }
 
 inline size_t
 packet_get_buffsize(packet_t *p)
 {
-	NULLCHECK(p);
 	return p->size;
 }
 
 inline void *
 packet_get_buff(packet_t *p)
 {
-	if (p == NULL)
-		return NULL;
 	return p->data;
 }
 
 inline int
 packet_set_buff(packet_t *p, void *buff, const size_t size)
 {
-	NULLCHECK(p);
 	if (buff == NULL) {
 		if (p->realloc_allowed == 1) {
 			free(p->data);
@@ -179,17 +165,13 @@ packet_set_buff(packet_t *p, void *buff, const size_t size)
 inline uint32_t
 packet_get_index(packet_t *p)
 {
-	NULLCHECK(p);
 	return p->index;
 }
 
 inline int
 packet_set_length(packet_t *p, const uint32_t value)
 {
-	NULLCHECK(p);
-	if (value > p->size) {
-		return EPACKET_ERR_OUT_OF_BOUNDS;
-	}
+	if (value > p->size) return EPACKET_ERR_OUT_OF_BOUNDS;
 	p->length = value;
 	return 0;
 }
@@ -197,24 +179,20 @@ packet_set_length(packet_t *p, const uint32_t value)
 inline uint32_t
 packet_get_readable(packet_t *p)
 {
-	NULLCHECK(p);
 	return p->length - p->index; 
 }
 
 uint32_t
 packet_get_write_op_count(packet_t *p)
 {
-	NULLCHECK(p);
 	return p->write_op_count;
 }
 
 inline int
 packet_w(packet_t *p, const void *ptr, const size_t size)
 {
-	NULLCHECK(p);
-	if (size == 0) {
-		return 0;
-	}
+	if (!size) return 0;
+
 	if(p->data) {
 		if(p->size <= p->index + size) {
 			if (p->realloc_allowed == 1) {
@@ -282,8 +260,6 @@ packet_w_8_t(packet_t *p, const void *ptr)
 inline int
 packet_w_bits(packet_t *p, const uint8_t src, const int n)
 {
-	NULLCHECK(p);
-
 	uint16_t 	masked;
 	uint8_t 	t;
 	int err = 0;
@@ -327,10 +303,8 @@ packet_w_bits(packet_t *p, const uint8_t src, const int n)
 inline int
 packet_r_bits(packet_t *p, uint8_t *ptr, const int n)
 {
-	NULLCHECK(p);
-	if (n <= 0 || n > 8) {
-		return EPACKET_ERR_OUT_OF_BOUNDS;
-	}
+	if (n <= 0 || n > 8) return EPACKET_ERR_OUT_OF_BOUNDS;
+
 	*ptr = 0;
 
 	if (p->bits_byte == NULL) {
@@ -361,8 +335,6 @@ packet_r_bits(packet_t *p, uint8_t *ptr, const int n)
 inline int
 packet_w_vlen29(packet_t *p, const uint32_t value)
 {
-	NULLCHECK(p);
-
 	uint8_t buffer[] = {0,0,0,0};
 
 	if (value < 128) { /* 2^7 */
@@ -392,10 +364,8 @@ packet_w_vlen29(packet_t *p, const uint32_t value)
 inline int
 packet_r(packet_t *p, void *ptr, const size_t size)
 {
-	NULLCHECK(p);
-	if (size == 0) {
-		return 0;
-	}
+	if (!size) return 0;
+
 	READCHECK(p, size);
     memcpy(ptr, p->data + p->index, size);
     p->index += size;
@@ -405,7 +375,6 @@ packet_r(packet_t *p, void *ptr, const size_t size)
 inline int
 packet_r_64_t(packet_t *p, void *ptr)
 {
-	NULLCHECK(p);
 	READCHECK(p, sizeof(int64_t));
 	int64_t result = (int64_t)ntohll(*(int64_t *)(p->data + p->index));
 	memcpy(ptr, &result, sizeof(int64_t)); 
@@ -416,7 +385,6 @@ packet_r_64_t(packet_t *p, void *ptr)
 inline int
 packet_r_32_t(packet_t *p, void *ptr)
 {
-	NULLCHECK(p);
 	READCHECK(p, sizeof(int32_t));
 	int32_t result = (int32_t)ntohl(*(int32_t *)(p->data + p->index));
 	memcpy(ptr, &result, sizeof(int32_t)); 
@@ -427,7 +395,6 @@ packet_r_32_t(packet_t *p, void *ptr)
 inline int
 packet_r_16_t(packet_t *p, void *ptr)
 {
-	NULLCHECK(p);
 	READCHECK(p, sizeof(int16_t));
 	int16_t result = (int16_t)ntohs(*(int16_t *)(p->data + p->index));
 	memcpy(ptr, &result, sizeof(int16_t)); 
@@ -471,7 +438,6 @@ packet_r_vlen29(packet_t *p, uint32_t *ptr)
 inline int
 packet_skip(packet_t *p, const size_t size)
 {
-	NULLCHECK(p);
 	READCHECK(p, size);
 	p->index += size;
 	return 0;
@@ -480,10 +446,8 @@ packet_skip(packet_t *p, const size_t size)
 inline int
 packet_skip_bits(packet_t *p, const int n)
 {
-	NULLCHECK(p);
-	if ( n <= 0 || n > 8) {
-		return EPACKET_ERR_OUT_OF_BOUNDS;
-	}
+	if (n <= 0 || n > 8) return EPACKET_ERR_OUT_OF_BOUNDS;
+
 	p->bits_index += n;
 	if (p->bits_index > 8) {
 		READCHECK(p, n);
@@ -504,14 +468,10 @@ packet_skip_vlen29(packet_t *p)
 inline int
 packet_rw_packet(packet_t *p_from, packet_t *p_to, const size_t size)
 {
-	NULLCHECK(p_from);
-	NULLCHECK(p_to);
 	READCHECK(p_from, size);
 
 	int err = packet_w(p_to, p_from->data + p_from->index, size);
-	if (err != 0) {
-		return err;
-	}
+	if (err) return err;
 	p_from->index += size;
 	return 0;
 }
