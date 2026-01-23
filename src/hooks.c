@@ -34,7 +34,7 @@ ufavonet_global_t ufavonet_global = {
 		.log 		= log_default,
 	},
 	.log_conf = (ufavonet_log_conf_t) {
-		.level 	= LOG_WARNING,
+		.level 	= LOG_INFO,
 		.fd 	= NULL
 	}
 };
