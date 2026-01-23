@@ -20,7 +20,6 @@
 
 
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
@@ -28,7 +27,7 @@
 #else
 #include <arpa/inet.h>
 #endif
-
+#include "_hooks.h"
 #include "../include/packet.h"
 
 #define ceil_int_division(A,B) ((A + (B-1)) / B)
@@ -67,7 +66,7 @@ struct packet
 inline packet_t *
 packet_init(void)
 {
-	packet_t *p = malloc(sizeof(*p));
+	packet_t *p = umalloc(sizeof(*p));
 	if (!p) return NULL;
 	RESETPACKET(p);
 	return p;
@@ -89,9 +88,9 @@ packet_init_from_buffcpy(const void *restrict buff, const size_t size)
 {
 	packet_t *p = packet_init();
 	if (!p) return NULL;
-	p->data = malloc(size);
+	p->data = umalloc(size);
 	if (p->data == NULL) {
-		free(p);
+		ufree(p);
 		return NULL;
 	}
 	memcpy(p->data, buff, size);
@@ -106,8 +105,8 @@ packet_free(packet_t *restrict *p)
 	if (!p) return EPACKET_ERR_NULL;
 	if (!*p) return EPACKET_ERR_NULL;
 	if ((*p)->realloc_allowed == 1)
-		free((*p)->data);
-	free(*p);
+		ufree((*p)->data);
+	ufree(*p);
 	*p = NULL;
 	return 0;
 }
@@ -146,13 +145,13 @@ packet_set_buff(packet_t *restrict p, void *buff, const size_t size)
 {
 	if (buff == NULL) {
 		if (p->realloc_allowed == 1) {
-			free(p->data);
+			ufree(p->data);
 		}
 		RESETPACKET(p);
 		return 0;
 	}
 	if (p->realloc_allowed == 1) {
-		free(p->data);
+		ufree(p->data);
 	}
 	p->realloc_allowed = 0;
 	p->data = buff;
@@ -206,9 +205,9 @@ packet_w(packet_t *restrict p, const void *restrict ptr, const size_t size)
 		if(p->size <= p->index + size) {
 			if (p->realloc_allowed == 1) {
 				p->size += PACKET_ALLOC_SIZE * ceil_int_division(size, PACKET_ALLOC_SIZE);
-				void *rallc = realloc(p->data, p->size);
+				void *rallc = urealloc(p->data, p->size);
 				if (rallc == NULL) {
-					free(p->data);
+					ufree(p->data);
 					p->index = 0;
 					p->length = 0;
 					p->size = 0;
@@ -222,7 +221,7 @@ packet_w(packet_t *restrict p, const void *restrict ptr, const size_t size)
 		} 
 	} else if (p->realloc_allowed == 1) {
 		p->size = PACKET_ALLOC_SIZE * ceil_int_division(size, PACKET_ALLOC_SIZE);
-		p->data = malloc(p->size);
+		p->data = umalloc(p->size);
 		if (p->data == NULL) {
 			p->size = 0;
 			return EPACKET_ERR_OUT_OF_MEMORY;

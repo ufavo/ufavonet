@@ -41,7 +41,7 @@
 #include <fcntl.h>
 #endif
 #include <errno.h>
-
+#include "_hooks.h"
 #include "../include/packet.h"
 #include "../include/net.h"
 
@@ -156,12 +156,12 @@ diep(char *s)
 	client = (client)->hh.next; \
 	HASH_DEL((conn)->data.srv.connected_clients, tmp_client); \
 	msghandle_free(&((tmp_client)->msghandle)); \
-	free(tmp_client);
+	ufree(tmp_client);
 
 netconn_t *
 server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const struct netsettings settings, void *userdata)
 {
-	netconn_t 				*conn = malloc(sizeof(netconn_t));
+	netconn_t 				*conn = umalloc(sizeof(netconn_t));
 	struct sockaddr_in 		sockaddr_server = {0};
 
 	memset(conn, 0, sizeof(*conn));
@@ -169,7 +169,7 @@ server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const s
 	/* obtain socket */
 	if ( (conn->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_INVALID ) {
 		diep("socket");
-		free(conn);
+		ufree(conn);
 		return NULL;
 	}
 
@@ -178,7 +178,7 @@ server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const s
 	u_long mode = 1;
 	if (ioctlsocket(conn->fd, FIONBIO, &mode) == SOCKET_ERROR) {
 		diep("ioctlsocket");
-		free(conn);
+		ufree(conn);
 		return NULL;
 	}
 #else	
@@ -193,7 +193,7 @@ server_init(in_addr_t ip, in_port_t port, const struct srvevents events, const s
 
 	if ( bind(conn->fd, (struct sockaddr *)&sockaddr_server, sizeof(sockaddr_server)) == SOCKET_ERROR) {
 		diep("bind");
-		free(conn);
+		ufree(conn);
 		return NULL;
 	}
 
@@ -233,7 +233,7 @@ server_free(netconn_t **conn)
 #endif
 	packet_free(&c->in_packet);
 	packet_free(&c->out_packet);
-	free(c);
+	ufree(c);
 	*conn = NULL;
 }
 
@@ -254,7 +254,7 @@ client_free(netconn_t **conn)
 	packet_free(&c->in_packet);
 	packet_free(&c->out_packet);
 	msghandle_free(&c->data.cli.msghandle);	
-	free(c);
+	ufree(c);
 	*conn = NULL;
 
 }
@@ -262,7 +262,7 @@ client_free(netconn_t **conn)
 netconn_t *
 client_init(in_addr_t ip, in_port_t port, const struct clievents events, const struct netsettings settings, void *userdata)
 {
-	netconn_t 	*conn = malloc(sizeof(*conn));
+	netconn_t 	*conn = umalloc(sizeof(*conn));
 	memset(conn, 0, sizeof(*conn));
 	
 	static const struct sockaddr_in emptyaddr = {0};
@@ -270,7 +270,7 @@ client_init(in_addr_t ip, in_port_t port, const struct clievents events, const s
 
 	if ( (conn->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_INVALID ) {
 		diep("socket");
-		free(conn);
+		ufree(conn);
 		return NULL;
 	}
 
@@ -279,7 +279,7 @@ client_init(in_addr_t ip, in_port_t port, const struct clievents events, const s
 	u_long mode = 1;
 	if (ioctlsocket(conn->fd, FIONBIO, &mode) == SOCKET_ERROR) {
 		diep("ioctlsocket");
-		free(conn);
+		ufree(conn);
 		return NULL;
 	}
 #else
@@ -403,7 +403,7 @@ server_process(netconn_t **__conn)
 				continue;
 			}
 			/* initialize client */
-			client = malloc(sizeof(struct srvclient));
+			client = umalloc(sizeof(struct srvclient));
 			client->id = cli_id;
 			client->common.n_local_tick_noresp = 0;
 			client->common.cur_remote_tick = 0;
