@@ -27,16 +27,20 @@
 
 static void log_default(void *ctx, int level, const char *restrict component, const char *restrict file, const char *restrict function, int line, const char *restrict fmt, ...);
 
+static const ufavonet_hooks_t _hooks_default = {
+	.free = free,
+	.realloc = realloc,
+	.log = log_default
+};
+
+static const ufavonet_log_conf_t _log_conf_default = {
+	.level 	= LOG_INFO,
+	.fd 	= NULL
+};
+
 ufavonet_global_t ufavonet_global = {
-	.hooks = (ufavonet_hooks_t) {
-		.free 		= free,
-		.realloc 	= realloc,
-		.log 		= log_default,
-	},
-	.log_conf = (ufavonet_log_conf_t) {
-		.level 	= LOG_INFO,
-		.fd 	= NULL
-	}
+	.hooks = _hooks_default,
+	.log_conf = _log_conf_default
 };
 
 void

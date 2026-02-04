@@ -22,6 +22,7 @@
 #define __UFAVONET_HOOKS_HEADER__
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stddef.h>
 
 #define	LOG_EMERG 	0
@@ -48,6 +49,7 @@ typedef struct {
 typedef struct {
 	ufavonet_hooks_t 	hooks;
 	ufavonet_log_conf_t log_conf;
+	uint8_t 			uthash_oom;
 } ufavonet_global_t;
 
 void	ufavonet_set_hooks(const ufavonet_hooks_t hooks);
