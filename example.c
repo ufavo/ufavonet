@@ -4,9 +4,9 @@
 #include <signal.h>
 #include <unistd.h>
 
-#include <arpa/inet.h>
-#include <ufavonet/packet.h>
-#include <ufavonet/net.h>
+#include "include/packet.h"
+#include "include/net.h"
+#include "include/hooks.h"
 
 static volatile int isclosing = 0;
 
@@ -17,22 +17,15 @@ void handlesigint(int x) {
 void
 print_dreason(int disconnect_reason)
 {
-	switch((enum netconn_kick_reason)disconnect_reason) {
-		case EKICK_NONE:
-			printf("Kicked.\n");
-		break;
-		case EKICK_DISCONNECT:
-			printf("Disconnect.\n");
-		break;
-		case EKICK_SERVER_CLOSING:
-			printf("Server is closing.\n");
-		break;
-		case EKICK_CONNECTION_REFUSED:
-			printf("Connection refused.\n");
-		break;
-		case EKICK_CONNECTION_TIMEOUT:
-			printf("Timed out.\n");
-		break;	
+	switch((enum netconn_disconnect_reason)disconnect_reason) {
+		case EDISCONNECT_NONE: 					puts("Disconnected by the server"); 	break;
+		case EDISCONNECT:						puts("Disconnected");					break;
+		case EDISCONNECT_SERVER_CLOSING:		puts("Server closing");					break;
+		case EDISCONNECT_SERVER_RESTARTING:		puts("Server restarting");				break;
+		case EDISCONNECT_REFUSED:				puts("Connection refused");				break;
+		case EDISCONNECT_TIMEOUT:				puts("Connection timed out");			break;
+		case EDISCONNECT_PROTOCOL_VIOLATION:	puts("Protocol violation");				break;
+		case EDISCONNECT_INTERNAL_ERROR:		puts("Internal error");					break;
 	}
 }
 
@@ -105,7 +98,7 @@ srv_onsrvclose(netconn_t **conn, void *userdata)
 	server_free(conn);
 	printf("\nServer closed gracefully.\n");
 }
-
+//#include <ufavolog.h>
 int
 main(const int argc, const char **args)
 {
@@ -139,14 +132,20 @@ usage:
 	}
 	/* handle ctrl+c */
 	signal(SIGINT, handlesigint);
-	
+
+//	ufavolog_init((const ufavolog_ctx_t){.level = LOG_DEBUG, .colored = 1, .stream = stderr});
+//	ufavonet_set_hooks((const ufavonet_hooks_t){.log = ufavolog3});
+	ufavonet_set_log_conf((const ufavonet_log_conf_t){.fd = stderr, .level = LOG_DEBUG});
+
 	netconn_t *conn = NULL;
 
 	if (args[1][0] == 'c') {
-		conn = client_init(inet_addr("127.0.0.1"), htons(27444), cli_events, settings, NULL);
+		conn = client_init(cli_events, settings, NULL);
+		client_connect(conn, EPROTO_UDP, "localhost", 27444);
 		printf("Client started!\n");
 	} else if (args[1][0] == 's') {
-		conn = server_init(htonl(INADDR_ANY), htons(27444), srv_events, settings, NULL);
+		conn = server_init(srv_events, settings, NULL);
+		server_listen(conn, EPROTO_UDP, "localhost", 27444);
 		printf("Server started!\n");
 	} else {
 		goto usage;
@@ -161,7 +160,7 @@ usage:
 		} else {
 			server_process(&conn);
 			if (isclosing == 1) {
-				server_close(conn);
+				server_close(conn, 0);
 			}
 		}
 		sleep(1);

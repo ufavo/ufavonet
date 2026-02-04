@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include "include/packet.h"
 #include "include/net.h"
+#include "src/netmsg.h"
+#include "src/_hooks.h"
 
 #ifdef _WIN32
 #define random() rand()
@@ -60,18 +62,24 @@ test_packet_rw_vlen29()
 	packet_t 	*p;
 	uint32_t 	i, j;
 
-	p = packet_init();
+	p = packet_init_prealloc(8);
 
-	for (i = 0; i < (1 << 29); i++) {
-		packet_w_vlen29(p, i);
-	}
+	uint32_t	numv[] = {
+		112,		// 1 byte
+		200,		// 2 bytes
+		17384,		// 3 bytes
+		3897152,	// 4 bytes
+	};
 
-	packet_rewind(p);
-
-	for (i = 0; i < (1 << 29); i++) {
+	for (i = 0; i < (uint32_t)(sizeof(numv) / sizeof(*numv)); i++) {
+		packet_rewind(p);
+		packet_w_vlen29(p, numv[i]);
+		
+		packet_rewind(p);
 		packet_r_vlen29(p, &j);
-		TEST_CMP(i, j, %d, packet_free(&p));
+		TEST_CMP(numv[i], j, %d, packet_free(&p));
 	}
+
 	packet_free(&p);
 	return EXIT_SUCCESS;
 }
@@ -210,6 +218,105 @@ TESTBODY_PACKET_RW_N_T(64,%ld, double in_d = 33.3498712f * (random() % 4000);dou
 					   TEST_CMP(in_d, out_d,%lf,packet_free(&p));
 					   })
 #endif
+
+int
+test_netmsg()
+{
+	netmsg_ctx_t a, b;
+	netmsg_init(&a, 256);
+	netmsg_init(&b, 256);
+
+	packet_t *pkt_from_a = packet_init();
+	packet_t *pkt_from_b = packet_init();
+
+	uint32_t msgc = 20000;
+	uint64_t *msgv = malloc(sizeof(*msgv) * msgc);
+	
+	uint32_t i;
+	for (i = 0; i < msgc; i++) {
+		msgv[i] = (uint64_t)random();
+	}
+
+	uint32_t msg_rcv = 0;
+	uint32_t msg_enq = 0;
+
+	uint32_t a_drops = 0, b_drops = 0;
+
+	// To start with, pack 200 groups to test MAX SEND behaviour.
+	for (; msg_enq < 200; msg_enq++) {
+		netmsg_enqueue(&a, msgv + msg_enq, sizeof(*msgv));
+		netmsg_pack(&a, pkt_from_a);
+		packet_rewind(pkt_from_a);
+	}
+	
+	do {
+		if (msg_enq < msgc) {
+			// enqueue a random number of messages each "tick"
+			uint32_t enq = msg_enq + (rand() % 4);
+			if (enq > msgc)
+				enq = msgc;
+			for (; msg_enq < enq; msg_enq++)
+				netmsg_enqueue(&a, msgv + msg_enq, sizeof(*msgv));
+		}
+		
+		netmsg_pack(&a, pkt_from_a);
+		packet_rewind(pkt_from_a);
+//		puts("----END----");
+	
+		void *msg; uint32_t size;
+		// Random packet drop
+		if (rand() % 4 != 2) {
+//			puts("-----B-----");
+			// Deliver to 'b'
+			while (netmsg_unpack_next(&b, pkt_from_a, &msg, &size) == ENETMSG_ERR_NONE) {
+				if (!msg) break;
+				if (msg_rcv == msgc) {
+					ulogf_emr("unpack_next attempted to unpack more messages than what's available");
+					goto fail;
+				}
+				if (size != sizeof(*msgv)) {
+					ulogf_emr("size mismatch\n");
+					goto fail;
+				}
+				if (memcmp(msg, msgv + msg_rcv, sizeof(*msgv)) != 0) {
+					ulogf_emr("contents mismatch\n");
+					goto fail;
+				}
+				msg_rcv++;
+			}
+			packet_rewind(pkt_from_a);
+//			puts("----END----");
+		} else a_drops++;
+		
+		// Pack b's response
+		netmsg_pack(&b, pkt_from_b);
+		packet_rewind(pkt_from_b);
+
+		// Random packet drop
+		if (rand() % 4 != 2) {
+//			puts("-----A-----");
+			// Deliver to 'a'
+			netmsg_unpack_next(&a, pkt_from_b, &msg, &size);
+			packet_rewind(pkt_from_b);
+		} else b_drops++;
+
+	} while (msg_rcv < msgc);
+	
+	ulogf_inf("dropped packets from A: %u; from B: %u\n", a_drops, b_drops);
+	netmsg_deinit(&a);
+	netmsg_deinit(&b);
+	packet_free(&pkt_from_a);
+	packet_free(&pkt_from_b);
+	free(msgv);
+	return EXIT_SUCCESS;
+fail:
+	netmsg_deinit(&a);
+	netmsg_deinit(&b);
+	packet_free(&pkt_from_a);
+	packet_free(&pkt_from_b);
+	free(msgv);
+	return EXIT_FAILURE;
+}
 
 /* networking test */
 #define NETTEST_CLI_MESSAGE "Hello from client."
@@ -385,8 +492,10 @@ test_all()
 
 	netconn_t *cli_info = NULL, *srv_info = NULL;
 	/* initialize server and client */
-	srv_info = server_init(htonl(INADDR_ANY), htons(25565), srvevents, settings, NULL);
-	cli_info = client_init(inet_addr("127.0.0.1"), htons(25565), clievents, settings, NULL);
+	srv_info = server_init(srvevents, settings, NULL);
+	server_listen(srv_info, EPROTO_UDP, "localhost", 25565);
+	cli_info = client_init(clievents, settings, NULL);
+	client_connect(cli_info, EPROTO_UDP, "localhost", 25565);
 
 	/* process loop */
 	for(i = 0; srv_info != NULL && i < 2048; i++) {
@@ -396,7 +505,7 @@ test_all()
 			client_disconnect(cli_info);
 			nettest_clistep++;
 		} else if (cli_info == NULL) {
-			server_close(srv_info);
+			server_close(srv_info, 0);
 			nettest_srvstep++;
 		}
 		usleep(5000);	
@@ -416,8 +525,6 @@ test_all()
 int
 main()
 {
-	INITIALIZE_WINSOCKS();
-
 	int total = 0, ok = 0;
 	srandom(time(NULL));
 
@@ -426,12 +533,10 @@ main()
 	TESTPACKET_RW_N_T(16);
 	TESTPACKET_RW_N_T(32);
 	TESTPACKET_RW_N_T(64);
-	//slow af in wine
-//	TEST(test_packet_rw_vlen29());
+	TEST(test_packet_rw_vlen29());
 	TEST(test_packet_all());
+	TEST(test_netmsg());
 	TEST(test_all());
 	printf("Total=%d, OK=%d\n", total, ok);
-
-	CLEANUP_WINSOCKS();
 	return 0;
 }

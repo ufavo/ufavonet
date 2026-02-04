@@ -7,8 +7,8 @@ WINCC		?= x86_64-w64-mingw32-gcc
 DESTDIR 	?=
 PREFIX		?= /usr/local
 # flags
-CFLAGS 		+= -std=c99 -pedantic -Wall -Wextra -O3
-LDFLAGS 	+= -Wl,-soname=lib$(NAME).so.$(SOVERSION)
+CFLAGS 		+= -std=c99 -pedantic -Wall -Wextra -O3 -flto
+LDFLAGS 	+= -Wl,-soname=lib$(NAME).so.$(SOVERSION) -flto
 DLL_LDFLAGS += -lws2_32
 
 CFILES 		= $(wildcard src/*.c)
@@ -25,7 +25,7 @@ tests: $(NAME) tests.c
 	$(CC) tests.c -std=gnu99 -pedantic -Wall -Wextra -O3 -Wno-unused-parameter -o tests -L. -l$(NAME) -Wl,-rpath=. && ./tests
 
 testsdll: dll tests.c
-	$(WINCC) tests.c -std=gnu99 -pedantic -O3 -Wno-unused-parameter -o tests.exe -L. -l$(NAME) $(DLL_LDFLAGS) -Wl,-rpath=. && wine64 tests.exe
+	$(WINCC) tests.c -std=gnu99 -pedantic -O3 -Wno-unused-parameter -o tests.exe -L. -l$(NAME) $(DLL_LDFLAGS) -Wl,-rpath=. && wine tests.exe
 
 $(NAME): $(CFILES) $(HFILES)
 	@echo prefix = $(PREFIX)
