@@ -22,6 +22,7 @@
 #define __UFAVONET_PACKET_HEADER__
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define PACKET_ALLOC_SIZE 256
 
@@ -50,6 +51,8 @@ packet_t *packet_init_from_buff(void *buff, const size_t size);
  * The resulting packet can grow as normal.
  * Returns `NULL` if memory allocation fails. */
 packet_t *packet_init_from_buffcpy(const void *restrict buff, const size_t size);
+/* Initialize a empty packet with prealloc'ed internal buffer of ´size´ */
+packet_t *packet_init_prealloc(uint32_t size);
 
 int packet_free(packet_t *restrict *p);
 /* Rewind a given packet, making it possible to reread or overwrite it. */

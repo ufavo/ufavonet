@@ -99,6 +99,22 @@ packet_init_from_buffcpy(const void *restrict buff, const size_t size)
 	return p;
 }
 
+inline packet_t *
+packet_init_prealloc(uint32_t size)
+{
+	packet_t *p = packet_init();
+	if (!p)		return NULL;
+	if (!size)	return p;
+
+	p->data = umalloc(size);
+	if (!p->data) {
+		packet_free(&p);
+		return NULL;
+	}
+	p->size = size;
+	return p;
+}
+
 inline int
 packet_free(packet_t *restrict *p)
 {
