@@ -16,9 +16,9 @@
 
 #define TEST(testfunc) printf(#testfunc"\t\t\t\t\t"); total++; if (testfunc == EXIT_SUCCESS) { printf("OK\n"); ok++; }
 
-#define TEST_CMP(in,out,printtype,before_exit) if (in != out) { printf("FAILED\n%d:\tout != in (" #printtype " != " #printtype ")\n", __LINE__, out, in); before_exit; return EXIT_FAILURE; }
+#define TEST_CMP(in,out,printtype,before_exit) if (in != out) { printf("FAILED\n%d:\tout != in (" printtype " != " printtype ")\n", __LINE__, out, in); before_exit; return EXIT_FAILURE; }
 
-#define TEST_CMPSTR(in,out,printtype,before_exit) if (strcmp(in,out) != 0) { printf("FAILED\n%d:\tout != in (" #printtype " != " #printtype ")\n", __LINE__, out, in); before_exit; return EXIT_FAILURE; }
+#define TEST_CMPSTR(in,out,printtype,before_exit) if (strcmp(in,out) != 0) { printf("FAILED\n%d:\tout != in (" printtype " != " printtype ")\n", __LINE__, out, in); before_exit; return EXIT_FAILURE; }
 
 
 #define TEST_LOOP_COUNT	8192
@@ -26,9 +26,9 @@
 int
 test_packet_rw_bits()
 {
-	uint8_t out;
+	uint8_t out, k;
 	packet_t 	*p;
-	int 	i, j, k;
+	int 	i, j;
 	int 	err;
 	p = packet_init();
 	k = 0;
@@ -49,7 +49,7 @@ test_packet_rw_bits()
 				printf("error packet_w_bits: %d\n", err);
 			}
 			k = ((0xFF >> (8 - j)) & i);
-			TEST_CMP(k,out,%d,packet_free(&p));
+			TEST_CMP(k,out,"%" PRIu8,packet_free(&p));
 		}
 	}
 	packet_free(&p);
@@ -77,7 +77,7 @@ test_packet_rw_vlen29()
 		
 		packet_rewind(p);
 		packet_r_vlen29(p, &j);
-		TEST_CMP(numv[i], j, %d, packet_free(&p));
+		TEST_CMP(numv[i], j, "%" PRIu32, packet_free(&p));
 	}
 
 	packet_free(&p);
@@ -134,25 +134,25 @@ test_packet_all()
 	packet_rewind(p);
 
 	packet_r_vlen29(p, &out_vlen);
-	TEST_CMP(in_vlen, out_vlen, %d, packet_free(&p));
+	TEST_CMP(in_vlen, out_vlen, "%" PRIu32, packet_free(&p));
 	packet_r(p, out_str, strlen(in_str)+1);
-	TEST_CMPSTR(in_str, out_str, %s, packet_free(&p));
+	TEST_CMPSTR(in_str, out_str, "%s", packet_free(&p));
 	packet_r_64_t(p, &out_int64_a);
-	TEST_CMP(in_int64_a, out_int64_a, %ld, packet_free(&p));
+	TEST_CMP(in_int64_a, out_int64_a, "%" PRIi64, packet_free(&p));
 	packet_r_64_t(p, &out_double_a);
-	TEST_CMP(in_double_a, out_double_a, %lf, packet_free(&p));
+	TEST_CMP(in_double_a, out_double_a, "%lf", packet_free(&p));
 	packet_r_32_t(p, &out_int32_a);
-	TEST_CMP(in_int32_a, out_int32_a, %d, packet_free(&p));
+	TEST_CMP(in_int32_a, out_int32_a, "%" PRIi32, packet_free(&p));
 	packet_r_32_t(p, &out_float_a);
-	TEST_CMP(in_float_a, out_float_a, %f, packet_free(&p));
+	TEST_CMP(in_float_a, out_float_a, "%f", packet_free(&p));
 	packet_r_bits(p, &out_bits_a, 4);
-	TEST_CMP(in_bits_a, out_bits_a, %d, packet_free(&p));
+	TEST_CMP(in_bits_a, out_bits_a, "%" PRIu8, packet_free(&p));
 	packet_r_16_t(p, &out_int16_a);
-	TEST_CMP(in_int16_a, out_int16_a, %d, packet_free(&p));
+	TEST_CMP(in_int16_a, out_int16_a, "%" PRIi16, packet_free(&p));
 	packet_r_8_t(p, &out_int8_a);
-	TEST_CMP(in_int8_a, out_int8_a, %d, packet_free(&p));
+	TEST_CMP(in_int8_a, out_int8_a, "%" PRIi8, packet_free(&p));
 	packet_r_bits(p, &out_bits_b, 4);
-	TEST_CMP(in_bits_b, out_bits_b, %d, packet_free(&p));
+	TEST_CMP(in_bits_b, out_bits_b, "%" PRIu8, packet_free(&p));
 
 	packet_free(&p);
 	return EXIT_SUCCESS;
@@ -201,27 +201,22 @@ test_packet_all()
 		return EXIT_SUCCESS; \
 	}
 
-TESTBODY_PACKET_RW_N_T(8,%d,{},{})
-TESTBODY_PACKET_RW_N_T(16,%d,{},{})
-TESTBODY_PACKET_RW_N_T(32,%d,float in_f = 33.3498712f * (random() % 4000);float out_f = 0.0f;packet_w_32_t(p, &in_f);,{
+TESTBODY_PACKET_RW_N_T(8,"%" PRIu8,{},{})
+TESTBODY_PACKET_RW_N_T(16,"%" PRIi16,{},{})
+TESTBODY_PACKET_RW_N_T(32,"%" PRIi32,float in_f = 33.3498712f * (random() % 4000);float out_f = 0.0f;packet_w_32_t(p, &in_f);,{
 					   packet_r_32_t(p, &out_f);
-					   TEST_CMP(in_f, out_f,%f,packet_free(&p));
+					   TEST_CMP(in_f, out_f,"%f",packet_free(&p));
 					   })
-#ifdef _WIN_32
-TESTBODY_PACKET_RW_N_T(64,%ldd, double in_d = 33.3498712f * (random() % 4000);double out_d = 0.0f; packet_w_64_t(p, &in_d);,{
+TESTBODY_PACKET_RW_N_T(64,"%" PRIi64, double in_d = 33.3498712f * (random() % 4000);double out_d = 0.0f; packet_w_64_t(p, &in_d);,{
 					   packet_r_64_t(p, &out_d);
-					   TEST_CMP(in_d, out_d,%lf,packet_free(&p));
+					   TEST_CMP(in_d, out_d,"%lf",packet_free(&p));
 					   })
-#else
-TESTBODY_PACKET_RW_N_T(64,%ld, double in_d = 33.3498712f * (random() % 4000);double out_d = 0.0f; packet_w_64_t(p, &in_d);,{
-					   packet_r_64_t(p, &out_d);
-					   TEST_CMP(in_d, out_d,%lf,packet_free(&p));
-					   })
-#endif
 
 int
 test_netmsg()
 {
+	printf("\n");
+
 	netmsg_ctx_t a, b;
 	netmsg_init(&a, 256);
 	netmsg_init(&b, 256);
