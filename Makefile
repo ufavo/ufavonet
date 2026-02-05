@@ -36,7 +36,7 @@ else
 	endif
 
 	SO_NAME_BASE = lib$(NAME).so
-	SO_NAME		 = $(SO_NAME_BASE).$(SOVERSION)
+	SO_NAME		 = $(SO_NAME_BASE).$(VERSION)
 	SO_LDFLAGS	+= -Wl,-soname=$(SO_NAME)
 	SO_LINK		 = so_ln_linux
 endif
@@ -67,7 +67,7 @@ $(SO_NAME): $(OBJ) $(HFILES)
 	$(CC) $(OBJ) $(SO_LDFLAGS) -o $(SO_NAME)
 
 so_ln_linux: $(SO_NAME)
-	ln -f -s $(SO_NAME_BASE).$(VERSION) $(SO_NAME)
+	ln -f -s $(SO_NAME) $(SO_NAME_BASE).$(SOVERSION)
 	ln -f -s $(SO_NAME) $(SO_NAME_BASE)
 
 install: $(SO_NAME)
