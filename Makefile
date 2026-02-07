@@ -23,8 +23,8 @@ ifneq (,$(findstring win64,$(PLATFORM)))
 		CC = x86_64-w64-mingw32-gcc
 	endif
 
-	LDFLAGS		+= -lws2_32
-	SO_LDFLAGS	+= -lws2_32
+	LDFLAGS		+= -lws2_32 -static
+	SO_LDFLAGS	+= -lws2_32 -static
 	FILE_EXT	 = .exe
 	SO_NAME		 = $(NAME).dll
 	RUNNER_TOOL	 = wine
@@ -58,8 +58,10 @@ options:
 clean:
 	rm -f tests tests.exe lib$(NAME).so* $(NAME).dll $(OBJ)
 
-tests: $(SO_NAME) tests.c
-	$(CC) tests.c -std=gnu99 -pedantic -Wall -Wextra -O3 -Wno-unused-parameter -o tests$(FILE_EXT) -L. -l$(NAME) $(LDFLAGS) -Wl,-rpath=. && $(RUNNER_TOOL) ./tests$(FILE_EXT)
+# testing now uses objects instead of the built .so 
+# to test internal functionality independently. e.g netmsg
+tests: $(OBJ) tests.c
+	$(CC) tests.c $(OBJ) -std=gnu99 -pedantic -Wall -Wextra -O3 -Wno-unused-parameter -flto=auto -o tests$(FILE_EXT) $(LDFLAGS) && $(RUNNER_TOOL) ./tests$(FILE_EXT)
 
 # use CC for linking to be able to use -flto
 $(SO_NAME): $(OBJ) $(HFILES)

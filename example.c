@@ -38,7 +38,7 @@ cli_onconnect(netconn_t *conn, void *userdata, packet_t *p_in, packet_t *p_out)
 void
 cli_ondisconnect(netconn_t **conn, void *userdata, int disconnect_reason)
 {
-	client_free(conn);
+	conn_free(conn);
 	printf("\nDisconnected! Reason: ");
 	print_dreason(disconnect_reason);
 	printf("Exiting.\n");
@@ -95,7 +95,7 @@ srv_onsendpkt(netconn_t *conn, void *userdata, packet_t *p_out, netsrvclient_t *
 void
 srv_onsrvclose(netconn_t **conn, void *userdata)
 {
-	server_free(conn);
+	conn_free(conn);
 	printf("\nServer closed gracefully.\n");
 }
 //#include <ufavolog.h>
@@ -109,6 +109,7 @@ main(const int argc, const char **args)
 		.kick_notice_tick = 5,
 		.timeout_tick = 30,
 		.expected_tick_tolerance = 8192,
+		.tick_rate = 2
 	};
 	/* Events */
 	const struct clievents cli_events = { 
@@ -152,18 +153,14 @@ usage:
 	}
 	printf("Press CTRL-C at any time to stop.\n");
 	while(conn != NULL) {
+		conn_process_blocking_relaxed(&conn, 0.96);
 		if (args[1][0] == 'c') {
-			client_process(&conn);
-			if (isclosing == 1) {
+			if (isclosing == 1)
 				client_disconnect(conn);
-			}
 		} else {
-			server_process(&conn);
-			if (isclosing == 1) {
+			if (isclosing == 1)
 				server_close(conn, 0);
-			}
 		}
-		sleep(1);
 	}
 	return 0;
 }

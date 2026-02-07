@@ -91,6 +91,8 @@ struct netsettings {
 	 * For a value of 10, the packet will be considered if (`remote_tick` > `last_applied_remote_tick`) && (`remote_tick` <= `local_tick` + 10 && `remote_tick` >= `local_tick` - 10).
 	 * A value of 8192 is highly recommended. Smaller values can be a problem with poor connections. A higher value significantly increases the chances of applying the wrong packet. */
 	uint16_t 	expected_tick_tolerance;
+	/* How many times per second a tick is processed. Only applies to `conn_process_*` functions. */
+	uint16_t 	tick_rate;
 };
 
 struct srvevents {
@@ -149,16 +151,9 @@ netconn_t *server_init(const struct srvevents events, const struct netsettings s
  * Must not be called again after success.
  * Returns 1 on success and 0 on failure. */
 int	server_listen(netconn_t *restrict conn, enum netconn_protocol proto, const char *restrict hostname, uint16_t port);
-/* Should be executed at a constant rate, until the event `onsrvclose` is triggered.
- * Each execution is considered a server tick. 
- * If executed with a `NULL` value as `__conn` nothing happens. */
-void server_process(netconn_t **__conn);
 /* Initiate the process of closing the server.
  * After called, eventually `onsrvclose` event will be triggered. */
 void server_close(netconn_t *restrict conn, uint8_t restarting);
-/* Close the socket and release resources.
- * Should be called in the event `onsrvclose`. */
-void server_free(netconn_t **conn);
 /* Disconnects the given `client` from the server it's associated with. */
 void server_cli_disconnect(netsrvclient_t *restrict client, enum netconn_disconnect_reason reason);
 
@@ -167,19 +162,12 @@ netconn_t *client_init(const struct clievents events, const struct netsettings s
  * Must not be called again after success.
  * Returns 1 on success and 0 on failure. */
 int	client_connect(netconn_t *restrict conn, enum netconn_protocol proto, const char *restrict hostname, uint16_t port);
-/* Should be executed at a constant rate, until the event `ondisconnect` is triggered.
- * Each execution is considered a client tick. 
- * If executed with a `NULL` value as `__conn` nothing happens. */
-void client_process(netconn_t **__conn);
 /* Send a message to the server.
  * Returns the id of the batch whose the message is part of. The id can be used to identify the batch of the message during `onmessageack` event. */
 int32_t client_sendmessage(netconn_t *restrict conn, const void *restrict buffer, const uint32_t size);
 /* Disconnects the client.
  * After called, eventually `ondisconnect` event will be triggered. */
 void client_disconnect(netconn_t *restrict conn);
-/* Close the socket and release resources.
- * Should be called in the event `ondisconnect`. */
-void client_free(netconn_t **conn);
 
 uint16_t client_get_remote_tick(netconn_t *restrict conn);
 
@@ -199,4 +187,34 @@ uint16_t 	server_cli_get_remote_tick(netsrvclient_t *restrict client);
 uint16_t 	conn_get_local_tick(netconn_t *restrict conn);
 /* return a pointer to the internal netstats struct */
 const struct netstats *conn_get_stats(netconn_t *restrict conn);
+
+/* Provides fine grained tick control. The user is responsible to manage the timing of each call.
+ * Runs a single tick (receive / process / send). Must be called at a the same rate by all parties until 
+ * the event (`onsrvclose` when a server; `ondisconnect` when a client) is triggered.
+ * Can be called safely even with `NULL` values. */
+void conn_tick(netconn_t **conn);
+
+/* Runs a tick `tick_rate` times per second. Should be called in a loop that runs fast enough to keep up 
+ * with `tick_rate`. Returns immediately (i.e. doesn't block waiting for the appropriate time to run the tick).
+ *
+ * Returns the time left in microseconds before the next run.
+ * Return values of zero or less indicates that the tick was run during the call.
+ * A negative return value (also in microseconds) indicates underrun (the loop is not going fast enough). */
+int_fast64_t 	conn_process_non_blocking(netconn_t **conn);
+/* Runs a tick `tick_rate` times per second. Should be called in a loop that runs fast enough to keep up 
+ * with `tick_rate`. Busy waits for the exact time to run the tick and returns after running it. */
+void 			conn_process_blocking_busy(netconn_t **conn);
+/* Runs a tick `tick_rate` times per second. Should be called in a loop that runs fast enough to keep up 
+ * with `tick_rate`. Sleeps the `relax_ratio` portion and then busy waits the remaining time to run the tick
+ * and returns after running it.
+ * `relax_ratio` ranges from:
+ * 		0.0 (completely busy; precise but wastes cpu cycles)
+ * 	to
+ * 		1.0 (completely relaxed; less precise; may underrun occasionally) */
+void 			conn_process_blocking_relaxed(netconn_t **conn, double relax_ratio);
+
+/* Close the socket and release resources.
+ * Can be called in the event (`onsrvclose` when a server; `ondisconnect` when a client). */
+void conn_free(netconn_t **conn);
+
 #endif

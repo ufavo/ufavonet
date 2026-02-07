@@ -76,6 +76,7 @@ test_packet_rw_vlen29()
 		packet_w_vlen29(p, numv[i]);
 		
 		packet_rewind(p);
+		j = 0;
 		packet_r_vlen29(p, &j);
 		TEST_CMP(numv[i], j, "%" PRIu32, packet_free(&p));
 	}
@@ -102,16 +103,16 @@ test_packet_all()
 	uint32_t 	in_vlen = random() % (1 << 29);
 
 	/* output */
-	uint8_t 	out_bits_a;
-	uint8_t 	out_bits_b;
-	int8_t 		out_int8_a;
-	int16_t 	out_int16_a;
-	float 		out_float_a;
-	int32_t 	out_int32_a;
-	double 		out_double_a; 
-	int64_t 	out_int64_a;
+	uint8_t 	out_bits_a = 0;
+	uint8_t 	out_bits_b = 0;
+	int8_t 		out_int8_a = 0;
+	int16_t 	out_int16_a = 0;
+	float 		out_float_a = 0;
+	int32_t 	out_int32_a = 0;
+	double 		out_double_a = 0; 
+	int64_t 	out_int64_a = 0;
 	char 		out_str[256];
-	uint32_t 	out_vlen;
+	uint32_t 	out_vlen = 0;
 
 	p = packet_init();
 
@@ -340,7 +341,7 @@ cli_onconnect(netconn_t *conn, void *userdata, packet_t *p_in, packet_t *p_out)
 void
 cli_ondisconnect(netconn_t **conn, void *userdata, int disconnect_reason)
 {
-	client_free(conn);
+	conn_free(conn);
 	printf("\t[client] ondisconnect got called with reason: %d\n", disconnect_reason);
 }
 void
@@ -455,7 +456,7 @@ void
 onsrvclose(netconn_t **conn, void *userdata)
 {
 	printf("\t[server] onsrvclose event got called.\n");
-	server_free(conn);
+	conn_free(conn);
 }
 
 int
@@ -494,8 +495,8 @@ test_all()
 
 	/* process loop */
 	for(i = 0; srv_info != NULL && i < 2048; i++) {
-		client_process(&cli_info);
-		server_process(&srv_info);
+		conn_tick(&cli_info);
+		conn_tick(&srv_info);
 		if (nettest_clistep == 3) {
 			client_disconnect(cli_info);
 			nettest_clistep++;
@@ -506,8 +507,8 @@ test_all()
 		usleep(5000);	
 	}
 	if (srv_info != NULL) {
-		server_free(&srv_info);
-		client_free(&cli_info);
+		conn_free(&srv_info);
+		conn_free(&cli_info);
 		printf("FAILED\n\tFailed to test all events.\n");
 		return EXIT_FAILURE;
 	} else if (nettest_fail == 1) {

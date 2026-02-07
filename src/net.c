@@ -19,6 +19,9 @@
  */
 
 
+#include "utime.h"
+
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +32,10 @@
 #include "../modules/uthash/src/uthash.h"
 #include "../include/net.h"
 
+enum {
+	ETYPE_SERVER = 0,
+	ETYPE_CLIENT
+};
 
 enum {
 	EPROT_STATUS_SIZE = 2,
@@ -88,20 +95,30 @@ struct srvconn {
 
 /* struct that represents a connection, be it a server or a client. */
 struct netconn {
-	packet_t 			*in_packet;
-	packet_t 			*out_packet;
-	uint8_t 			in_buffer[65535];
-	uint8_t 			out_buffer[65535];
-	usocket_t 			udp_sock;
-
-	uint16_t 			local_tick;
+	uint16_t 			tick_local;
+	uint8_t 			type;
+	uint16_t 			tick_underrun_count; //> Prevents log spam
+	utime_t 			timing;
+	int_fast64_t 		tick_time_margin_us;
+	int_fast64_t 		tick_time_target_us;
+	int_fast64_t 		tick_time_underrun_us;
+	
 	struct netstats 	stats;
 	struct netsettings 	settings;
+	
+	usocket_t 			udp_sock;
+
 	union {
 		struct srvconn 	srv;
 		struct cliconn 	cli;
 	} data;
+
 	void 				*userdata;
+
+	packet_t 			*in_packet;
+	packet_t 			*out_packet;
+	uint8_t 			in_buffer[65535];
+	uint8_t 			out_buffer[65535];
 };
 
 /* a given tick is valid if (tick > last tick) && (tick <= expected + margin && tick >= expected - margin)  */
@@ -132,7 +149,7 @@ static inline void
 _send_disconnect(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr, uint8_t reason)
 {
 	packet_rewind(conn->out_packet);
-	packet_w_16_t(conn->out_packet, &conn->local_tick);
+	packet_w_16_t(conn->out_packet, &conn->tick_local);
 	packet_w_bits(conn->out_packet, EPROT_STATUS_DISCONNECT, EPROT_STATUS_SIZE);
 	packet_w_8_t(conn->out_packet, &reason);
 	_conn_udp_send(conn, cli_addr);
@@ -383,7 +400,7 @@ _server_process_recv(netconn_t *restrict conn)
 			if (c->common.status_local == EPROT_STATUS_CONNECT) {
 				/* call onconnect */
 				packet_rewind(conn->out_packet);
-				packet_w_16_t(conn->out_packet, &conn->local_tick);
+				packet_w_16_t(conn->out_packet, &conn->tick_local);
 				packet_w_bits(conn->out_packet, c->common.status_local, EPROT_STATUS_SIZE);
 				switch((enum netconn_connect_result)conn->data.srv.events.onconnect(conn, conn->userdata, conn->in_packet, conn->out_packet, c, &c->userdata)) {
 					case ECONNECTION_ALLOW:
@@ -477,7 +494,7 @@ _server_process_send(netconn_t *restrict conn)
 
 		/* prepare packet */
 		packet_rewind(conn->out_packet);
-		packet_w_16_t(conn->out_packet, &conn->local_tick);
+		packet_w_16_t(conn->out_packet, &conn->tick_local);
 		packet_w_bits(conn->out_packet, client->common.status_local, EPROT_STATUS_SIZE);
 		
 		const uint32_t write_op_cnt = packet_get_write_op_count(conn->out_packet);
@@ -557,7 +574,7 @@ _client_process_recv(netconn_t **__conn)
 
 			if (s->tick_remote == EPROT_STATUS_CONNECT) {
 				packet_rewind(conn->out_packet);
-				packet_w_16_t(conn->out_packet, &conn->local_tick);
+				packet_w_16_t(conn->out_packet, &conn->tick_local);
 				packet_w_bits(conn->out_packet, s->status_local, EPROT_STATUS_SIZE);
 				conn->data.cli.events.onconnect(conn, conn->userdata, conn->in_packet, conn->out_packet);
 				continue;
@@ -616,7 +633,7 @@ _client_process_send(netconn_t **__conn)
 		 * overriding the tick number is safe (granted to be the first 2 bytes). */
 		uint32_t length = packet_get_length(conn->out_packet);
 		packet_rewind(conn->out_packet);
-		packet_w_16_t(conn->out_packet, &conn->local_tick);
+		packet_w_16_t(conn->out_packet, &conn->tick_local);
 		packet_set_length(conn->out_packet, length);
 		_conn_udp_send(conn, &conn->udp_sock.addr);
 		return;
@@ -624,7 +641,7 @@ _client_process_send(netconn_t **__conn)
 	
 	/* prepare packet */
 	packet_rewind(conn->out_packet);
-	packet_w_16_t(conn->out_packet, &conn->local_tick);
+	packet_w_16_t(conn->out_packet, &conn->tick_local);
 	packet_w_bits(conn->out_packet, s->status_local, EPROT_STATUS_SIZE);
 
 	const uint32_t write_op_cnt = packet_get_write_op_count(conn->out_packet);
@@ -664,6 +681,27 @@ _conn_init(const struct netsettings settings, void *userdata)
 	memset(conn, 0, sizeof(*conn));
 	conn->settings = settings;
 	conn->userdata = userdata;
+	if (settings.tick_rate) {
+		conn->tick_time_target_us = 1000000L / settings.tick_rate;
+
+		/* measure approx. sleep overhead */
+		int_fast64_t max = 0;
+		utime_t t = {0};
+		utime_remaining(&t, 0);
+		int i;
+		/* 100 ms worth of samples */
+		for (i = 0; i < 100000 / 100; i++) {
+			utime_usleep(100);
+			int_fast64_t o = utime_remaining(&t, 100);
+			/* always assume at least 500us + 50% of overhead */
+			o = (o <= -500? -o : 500) * 1.50;
+			if (o > max)
+				max = o;
+		}
+		ulogf_dbg("Estimated relaxed tick margin: %" PRIi64 "us", (int64_t)max);
+		conn->tick_time_margin_us = max;
+	}
+	conn->tick_time_underrun_us = -INT64_MAX;
 
 	conn->in_packet = packet_init_from_buff(conn->in_buffer, sizeof(conn->in_buffer));
 	conn->out_packet = packet_init_from_buff(conn->out_buffer, sizeof(conn->out_buffer));
@@ -692,33 +730,9 @@ _conn_socket_init(netconn_t *restrict conn, enum netconn_protocol proto, const c
 	return 0;
 }
 
-/********************************
- *		SERVER PUBLIC API		*
- ********************************/
-
-netconn_t *
-server_init(const struct srvevents events, const struct netsettings settings, void *userdata)
+static inline void
+server_tick(netconn_t **__conn)
 {
-	netconn_t *conn = _conn_init(settings, userdata);
-	if (!conn) return NULL;
-	conn->data.srv.events = events;
-	return conn;
-}
-
-int
-server_listen(netconn_t *restrict conn, enum netconn_protocol proto, const char *restrict hostname, uint16_t port)
-{
-	int r = _conn_socket_init(conn, proto, hostname, port);
-	if (!r) return r;
-	return usock_udp_bind(&conn->udp_sock);
-}
-
-void
-server_process(netconn_t **__conn)
-{
-	if (!__conn) 	return;
-	if (!*__conn) 	return;
-
 	netconn_t *conn = *__conn;
 
 	if (conn->data.srv.is_closing) {
@@ -737,16 +751,22 @@ server_process(netconn_t **__conn)
 	_server_process_recv(conn);
 	_server_process_send(conn);
 	
-	conn->local_tick++;
+	conn->tick_local++;
 }
 
-void
-server_free(netconn_t **conn)
+static inline void
+client_tick(netconn_t **__conn)
 {
-	if (!conn) 	return;
-	if (!*conn)	return;
+	_client_process_recv(__conn);
+	_client_process_send(__conn);
 
-	netconn_t 			*c = *conn;
+	if (*__conn)
+		(*__conn)->tick_local++;
+}
+
+static inline void
+server_cleanup(netconn_t *c)
+{
 	struct srvclient 	*client;
 
 	if (HASH_COUNT(c->data.srv.connected_clients) > 0) {
@@ -761,9 +781,28 @@ server_free(netconn_t **conn)
 			client = c->data.srv.connected_clients;
 		}
 	}
+}
 
-	_conn_deinit(*conn);
-	*conn = NULL;
+/********************************
+ *		SERVER PUBLIC API		*
+ ********************************/
+
+netconn_t *
+server_init(const struct srvevents events, const struct netsettings settings, void *userdata)
+{
+	netconn_t *conn = _conn_init(settings, userdata);
+	if (!conn) return NULL;
+	conn->data.srv.events = events;
+	conn->type = ETYPE_SERVER;
+	return conn;
+}
+
+int
+server_listen(netconn_t *restrict conn, enum netconn_protocol proto, const char *restrict hostname, uint16_t port)
+{
+	int r = _conn_socket_init(conn, proto, hostname, port);
+	if (!r) return r;
+	return usock_udp_bind(&conn->udp_sock);
 }
 
 void
@@ -850,13 +889,14 @@ client_init(const struct clievents events, const struct netsettings settings, vo
 	netconn_t *conn = _conn_init(settings, userdata);
 	if (!conn) return NULL;
 	conn->data.cli.events = events;
+	conn->type = ETYPE_CLIENT;
 	if (!netmsg_init(&conn->data.cli.msgctx, 128)) {
 		_conn_deinit(conn);
 		return NULL;
 	}
 
 	/* prepare first packet */
-	packet_w_16_t(conn->out_packet, &conn->local_tick);
+	packet_w_16_t(conn->out_packet, &conn->tick_local);
 	packet_w_bits(conn->out_packet, conn->data.cli.common.status_local, EPROT_STATUS_SIZE);
 	conn->data.cli.events.onconnect(conn, conn->userdata, conn->in_packet, conn->out_packet);
 	return conn;
@@ -866,28 +906,6 @@ int
 client_connect(netconn_t *restrict conn, enum netconn_protocol proto, const char *restrict hostname, uint16_t port)
 {
 	return _conn_socket_init(conn, proto, hostname, port);
-}
-
-void
-client_free(netconn_t **conn)
-{
-	if (!conn) 	return;
-	if (!*conn) return;
-	_conn_deinit(*conn);
-	*conn = NULL;
-}
-
-void
-client_process(netconn_t **__conn)
-{
-	if (!__conn) 	return;
-	if (!*__conn) 	return;
-
-	_client_process_recv(__conn);
-	_client_process_send(__conn);
-
-	if (*__conn)
-		(*__conn)->local_tick++;
 }
 
 void
@@ -916,11 +934,95 @@ client_get_remote_tick(netconn_t *restrict conn)
  *		GENERIC PUBLIC API		*
  ********************************/
 
+void
+conn_free(netconn_t **conn)
+{
+	if (!conn)	return;
+	if (!*conn)	return;
+
+	if ((*conn)->type == ETYPE_SERVER)
+		server_cleanup(*conn);
+
+	_conn_deinit(*conn);
+	*conn = NULL;
+}
+
+inline void
+conn_tick(netconn_t **conn)
+{
+	if (!conn) 	return;
+	if (!*conn) return;
+
+	switch ((*conn)->type) {
+		case ETYPE_CLIENT: client_tick(conn); break;
+		case ETYPE_SERVER: server_tick(conn); break;
+	}
+}
+
+inline int_fast64_t
+conn_process_non_blocking(netconn_t **conn)
+{
+	if (!conn)	return 0;
+	if (!*conn)	return 0;
+
+	const int_fast64_t target_us = (*conn)->tick_time_target_us;
+	const int_fast64_t remaining_us = utime_remaining(&(*conn)->timing, target_us);
+
+	if (remaining_us <= 0) {
+
+		/* handle underrun */
+		if (remaining_us < -(int_fast64_t)(target_us * 0.05)) {
+			(*conn)->tick_time_underrun_us += -remaining_us;
+		} else {
+			(*conn)->tick_time_underrun_us = 0;
+		}
+
+		int_fast64_t underrun = (*conn)->tick_time_underrun_us;
+		if (underrun >= target_us) {
+			/* log only once per second */
+			if ((*conn)->tick_underrun_count++ == 1000000L / (target_us + (-remaining_us))) {
+				ulogf_alr("Can't keep up. Running %" PRIi64 " ticks behind.", (int64_t)(underrun / target_us));
+				(*conn)->tick_underrun_count = 0;
+				(*conn)->tick_time_underrun_us = 0;
+			}
+		}
+
+		conn_tick(conn);
+	}
+	return remaining_us;
+}
+
+inline void
+conn_process_blocking_busy(netconn_t **conn)
+{
+	int_fast64_t remaining_us;
+	do {
+		remaining_us = conn_process_non_blocking(conn);
+	} while (remaining_us > 0);
+}
+
+void
+conn_process_blocking_relaxed(netconn_t **conn, double relax_ratio)
+{
+	if (!conn)	return;
+	if (!*conn)	return;
+
+	int_fast64_t margin = (*conn)->tick_time_margin_us;
+	int_fast64_t remaining_us = conn_process_non_blocking(conn);
+
+	int_fast64_t relaxed_us = remaining_us * relax_ratio;
+
+	if (relaxed_us > margin)
+		utime_usleep(relaxed_us);
+
+	conn_process_blocking_busy(conn);
+}
+
 uint16_t
-conn_get_local_tick(netconn_t *restrict conn)
+conn_get_tick_local(netconn_t *restrict conn)
 {
 	if (!conn) return 0;
-	return conn->local_tick;
+	return conn->tick_local;
 }
 
 const struct netstats *
