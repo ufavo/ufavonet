@@ -29,6 +29,7 @@
 #endif
 #include "_hooks.h"
 #include "../include/packet.h"
+#include "packet_internal.h"
 
 #define ceil_int_division(A,B) ((A + (B-1)) / B)
 
@@ -49,19 +50,6 @@
 	memset(p, 0, sizeof(*p)); \
 	p->realloc_allowed = 1;
 
-
-struct packet
-{
-	uint32_t	index;
-	uint32_t 	length;
-	uint8_t 	*data;
-	size_t		size;
-	uint32_t 	write_op_count;
-	uint8_t 	realloc_allowed;
-
-	uint8_t 	bits_index;
-	uint8_t 	*bits_byte;
-}; 
 
 inline packet_t *
 packet_init(void)

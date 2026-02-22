@@ -20,11 +20,13 @@
 
 
 #include "utime.h"
+#include "_packet.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "_hooks.h"
 #include "usocket.c"
@@ -65,6 +67,7 @@ struct conncommon {
 	uint8_t 	status_local;
 	uint8_t 	status_remote;
 	uint8_t 	disconnect_reason;
+	uint8_t 	internal_onconnect_status;
 };
 
 /* struct that represents a client in the server */
@@ -265,13 +268,162 @@ _server_netmsg_unpack_all(netconn_t *restrict conn, netsrvclient_t *restrict cli
 	return 1;
 }
 
+static inline int
+_server_onconnect_internal(netconn_t *restrict conn, netsrvclient_t *restrict client, packet_t *restrict p_in, packet_t *restrict p_out)
+{
+	// Announce server tickrate
+	packet_w_16_t(p_out, &conn->settings.tick_rate);
+	return ECONNECTION_ALLOW;
+}
+
+static inline int
+_client_onconnect_internal(netconn_t **__conn, packet_t *restrict p_in, packet_t *restrict p_out)
+{
+	netconn_t *conn = *__conn;
+
+	int err = 0;
+
+	if (packet_get_length(p_in) == 0)
+		return 0;
+
+	// Apply tickrate
+	uint16_t server_tick_rate = 0;
+	err = packet_r_16_t(p_in, &server_tick_rate);
+	if (err) goto fail;
+
+	if (server_tick_rate != conn->settings.tick_rate && server_tick_rate) {
+		// use the same rate as the server
+		ulogf_ntc("Tick rate mismatch. Server: %" PRIu16 "; Client: %" PRIu16". Now running at %" PRIu16 ".", server_tick_rate, conn->settings.tick_rate, server_tick_rate);
+
+		#define update_setting(value) if (value) (value) = ((int32_t)(server_tick_rate) * (int32_t)(value)) / (int32_t)(conn->settings.tick_rate)
+		update_setting(conn->settings.kick_notice_tick);
+		update_setting(conn->settings.timeout_tick);
+		update_setting(conn->settings.pending_conn_timeout_tick);
+		#undef update_setting
+		
+		conn->tick_time_target_us = 1000000L / server_tick_rate;
+		conn->settings.tick_rate = server_tick_rate;
+	}
+	return 1;
+
+fail:
+	if (err == EPACKET_ERR_OUT_OF_BOUNDS) {
+		ulogf_ntc("Protocol violation during internal connect stage.");
+		_client_disconnect(__conn, EDISCONNECT_PROTOCOL_VIOLATION);
+	} else {
+		ulogf_err("Internal error during internal connect stage. packet err: %" PRIi32, err);
+		_client_disconnect(__conn, EDISCONNECT_INTERNAL_ERROR);
+	}
+	return -1;
+}
+
+static inline void
+_server_netmsg_pack_connect(netconn_t *restrict conn, netsrvclient_t *restrict client, void *data, size_t size)
+{
+	packet_t pin;
+	_packet_init_from_buf(&pin, data, size);
+	packet_set_length(&pin, size);
+	packet_rewind(conn->out_packet);
+
+	enum netconn_connect_result res = ECONNECTION_ALLOW;
+
+	if (client->common.internal_onconnect_status == 0) {
+		// Internal onconnect
+		res = _server_onconnect_internal(conn, client, &pin, conn->out_packet);
+		if (res == ECONNECTION_ALLOW) {
+			if (packet_get_write_op_count(conn->out_packet))
+				netmsg_enqueue(&client->msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
+			client->common.internal_onconnect_status = 1;
+			return;
+		}
+	} else if (conn->data.srv.events.onconnect) {
+		// User onconnect
+		res = conn->data.srv.events.onconnect(conn, conn->userdata, &pin, conn->out_packet, client, &client->userdata);
+	}
+
+	switch(res) {
+		case ECONNECTION_ALLOW:
+			client->common.status_local 		= EPROT_STATUS_CONNECTED;
+			client->common.tick_local 			= client->common.tick_remote;
+			client->common.tick_remote_latest 	= client->common.tick_remote;
+			break;
+		case ECONNECTION_REFUSE:
+			_server_client_disconnect(conn, client, EDISCONNECT_REFUSED);
+			break;
+		case ECONNECTION_AGAIN:
+			if (packet_get_write_op_count(conn->out_packet))
+				netmsg_enqueue(&client->msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
+			break;
+	}
+}
+
+static inline int
+_server_netmsg_unpack_onconnect(netconn_t *restrict conn, netsrvclient_t *restrict client, packet_t *restrict p_in)
+{
+	int once = 0;
+	_conn_netmsg_unpack_all(&client->msgctx, p_in, {
+		if (once) {
+			ulogf_ntc("Protocol violation: Client sent more then one message at a time during connect stage.");
+			_server_client_disconnect(conn, client, EDISCONNECT_PROTOCOL_VIOLATION);
+			return 0;
+		}
+		_server_netmsg_pack_connect(conn, client, data, size);
+		once = 1;
+	}, {
+		_server_client_disconnect(conn, client, EDISCONNECT_INTERNAL_ERROR);
+		return 0;
+	}, {
+		_server_client_disconnect(conn, client, EDISCONNECT_PROTOCOL_VIOLATION);
+		return 0;
+	});
+	if (!once) {
+		_server_netmsg_pack_connect(conn, client, NULL, 0);
+	}
+	return 1;
+}
+
+static inline int
+_client_netmsg_pack_connect(netconn_t **__conn, void *data, size_t size)
+{
+	netconn_t *conn = *__conn;
+
+	packet_t pin;
+	_packet_init_from_buf(&pin, data, size);
+	packet_set_length(&pin, size);
+	packet_rewind(conn->out_packet);
+
+	if (!conn->data.cli.common.internal_onconnect_status) {
+		int res = _client_onconnect_internal(__conn, &pin, conn->out_packet);
+		if (res == 1)
+			conn->data.cli.common.internal_onconnect_status = 1;
+		else if (res < 0)
+			return 0;
+	} else if (conn->data.cli.events.onconnect) {
+		conn->data.cli.events.onconnect(conn, conn->userdata, &pin, conn->out_packet);
+	}
+	if (packet_get_write_op_count(conn->out_packet))
+		netmsg_enqueue(&conn->data.cli.msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
+
+	return 1;
+}
+
 /* Returns 0 on failure (connection being terminated) */
 static inline int
 _client_netmsg_unpack_all(netconn_t **__conn, packet_t *restrict p_in)
 {
 	netconn_t *conn = *__conn;
+	int once = 0;
 	_conn_netmsg_unpack_all(&conn->data.cli.msgctx, p_in, {
-		if (conn->data.cli.events.onreceivemsg)
+		if (conn->data.cli.common.status_remote == EPROT_STATUS_CONNECT) {
+			if (once) {
+				ulogf_ntc("Protocol violation: Server sent more then one message at a time during connect stage.");
+				_client_disconnect(__conn, EDISCONNECT_PROTOCOL_VIOLATION);
+				return 0;
+			}
+			if (!_client_netmsg_pack_connect(__conn, data, size))
+				return 0;
+			once++;
+		} else if (conn->data.cli.events.onreceivemsg)
 			conn->data.cli.events.onreceivemsg(conn, conn->userdata, data, size);
 	}, {
 		_client_disconnect(__conn, EDISCONNECT_INTERNAL_ERROR);
@@ -392,33 +544,16 @@ _server_process_recv(netconn_t *restrict conn)
 			continue;
 
 
-		uint8_t tick_applicable = tick_remote_applicable(c->common.tick_remote, c->common.tick_remote_latest, c->common.tick_local, conn->settings.expected_tick_tolerance);
-
-
 		/* handle connect */
 		if (c->common.status_remote == EPROT_STATUS_CONNECT) {
 			if (c->common.status_local == EPROT_STATUS_CONNECT) {
-				/* call onconnect */
-				packet_rewind(conn->out_packet);
-				packet_w_16_t(conn->out_packet, &conn->tick_local);
-				packet_w_bits(conn->out_packet, c->common.status_local, EPROT_STATUS_SIZE);
-				switch((enum netconn_connect_result)conn->data.srv.events.onconnect(conn, conn->userdata, conn->in_packet, conn->out_packet, c, &c->userdata)) {
-					case ECONNECTION_ALLOW:
-						c->common.status_local 			= EPROT_STATUS_CONNECTED;
-						c->common.tick_local 			= c->common.tick_remote;
-						c->common.tick_remote_latest 	= c->common.tick_remote;
-						break;
-					case ECONNECTION_REFUSE:
-						_server_client_disconnect(conn, c, EDISCONNECT_REFUSED);
-						break;
-					case ECONNECTION_AGAIN:
-						_conn_udp_send(conn, &c->sockaddr);
-						break;
-				}
+				_server_netmsg_unpack_onconnect(conn, c, conn->in_packet);
+				continue;
 			}
-			continue;
 		}
 
+
+		uint8_t tick_applicable = tick_remote_applicable(c->common.tick_remote, c->common.tick_remote_latest, c->common.tick_local, conn->settings.expected_tick_tolerance);
 
 		/* handle default EPROT_STATUS_CONNECTED behaviour */
 		if (tick_applicable || c->common.tick_local_noresp_count > 16384) {
@@ -489,7 +624,7 @@ _server_process_send(netconn_t *restrict conn)
 			}
 		}
 
-		if (client->common.status_local != EPROT_STATUS_CONNECTED)
+		if (client->common.status_local != EPROT_STATUS_CONNECTED && client->common.status_local != EPROT_STATUS_CONNECT)
 			goto next_client;
 
 		/* prepare packet */
@@ -508,17 +643,19 @@ _server_process_send(netconn_t *restrict conn)
 			continue;
 		}
 
-		/* call onsend */
-		conn->data.srv.events.onsendpkt(conn, conn->userdata, conn->out_packet, client, client->userdata);
+		if (client->common.status_local == EPROT_STATUS_CONNECTED) {
+			/* call onsend. only for connected clients. */
+			conn->data.srv.events.onsendpkt(conn, conn->userdata, conn->out_packet, client, client->userdata);
 
-		/* netmsg_pack() always perform at least one write operation.
-		 * The packet must be sent if netmsg_pack() performed more then
-		 * one write or onsendpkt() performed one or more writes. */
-		if (packet_get_write_op_count(conn->out_packet) == write_op_cnt + 1) {
-			/* avoid sending empty packets if possible */
-			if (client->common.send_skip_count++ < conn->settings.timeout_tick / 8)
-				goto next_client;
-			client->common.send_skip_count = 0;
+			/* netmsg_pack() always perform at least one write operation.
+			 * The packet must be sent if netmsg_pack() performed more then
+			 * one write or onsendpkt() performed one or more writes. */
+			if (packet_get_write_op_count(conn->out_packet) == write_op_cnt + 1) {
+				/* avoid sending empty packets if possible */
+				if (client->common.send_skip_count++ < conn->settings.timeout_tick / 8)
+					goto next_client;
+				client->common.send_skip_count = 0;
+			}
 		}
 
 		_conn_udp_send(conn, &client->sockaddr);
@@ -556,6 +693,11 @@ _client_process_recv(netconn_t **__conn)
 			return;
 		}
 
+		/* handle messages */
+		if (!_client_netmsg_unpack_all(__conn, conn->in_packet)) {
+			/* error. connection being dropped. */
+			return;
+		}
 
 		uint8_t tick_applicable = tick_remote_applicable(s->tick_remote, s->tick_remote_latest, s->tick_local, conn->settings.expected_tick_tolerance);
 
@@ -565,24 +707,13 @@ _client_process_recv(netconn_t **__conn)
 			s->tick_remote_latest 		= s->tick_remote;
 			s->tick_local 				= s->tick_remote;
 			s->tick_local_noresp_count	= 0;
+			s->status_local 			= s->status_remote;
 
-			/* handle messages */
-			if (!_client_netmsg_unpack_all(__conn, conn->in_packet)) {
-				/* error. connection being dropped. */
-				return;
-			}
-
-			if (s->tick_remote == EPROT_STATUS_CONNECT) {
-				packet_rewind(conn->out_packet);
-				packet_w_16_t(conn->out_packet, &conn->tick_local);
-				packet_w_bits(conn->out_packet, s->status_local, EPROT_STATUS_SIZE);
-				conn->data.cli.events.onconnect(conn, conn->userdata, conn->in_packet, conn->out_packet);
+			if (s->status_remote == EPROT_STATUS_CONNECT)
 				continue;
-			}
 			
 			/* call onreceive */
 			conn->data.cli.events.onreceivepkt(conn, conn->userdata, conn->in_packet);
-			s->status_local = s->status_remote;
 		}
 	}
 }
@@ -627,17 +758,6 @@ _client_process_send(netconn_t **__conn)
 		}
 	}
 
-	/* handle connect */
-	if (s->status_local == EPROT_STATUS_CONNECT) {
-		/* out packet already prepared by client_init func. 
-		 * overriding the tick number is safe (granted to be the first 2 bytes). */
-		uint32_t length = packet_get_length(conn->out_packet);
-		packet_rewind(conn->out_packet);
-		packet_w_16_t(conn->out_packet, &conn->tick_local);
-		packet_set_length(conn->out_packet, length);
-		_conn_udp_send(conn, &conn->udp_sock.addr);
-		return;
-	}
 	
 	/* prepare packet */
 	packet_rewind(conn->out_packet);
@@ -655,18 +775,21 @@ _client_process_send(netconn_t **__conn)
 		return;
 	}
 
-	/* call onsend */
-	conn->data.cli.events.onsendpkt(conn, conn->userdata, conn->out_packet);
+	if (s->status_local != EPROT_STATUS_CONNECT) {
+		/* call onsend */
+		conn->data.cli.events.onsendpkt(conn, conn->userdata, conn->out_packet);
 
-	/* netmsg_pack() always perform at least one write operation.
-	 * The packet must be sent if netmsg_pack() performed more then
-	 * one write or onsendpkt() performed one or more writes. */
-	if (packet_get_write_op_count(conn->out_packet) == write_op_cnt + 1) {
-		/* avoid sending empty packets if possible */
-		if (s->send_skip_count++ < conn->settings.timeout_tick / 8)
-			return;
-		s->send_skip_count = 0;
+		/* netmsg_pack() always perform at least one write operation.
+		 * The packet must be sent if netmsg_pack() performed more then
+		 * one write or onsendpkt() performed one or more writes. */
+		if (packet_get_write_op_count(conn->out_packet) == write_op_cnt + 1) {
+			/* avoid sending empty packets if possible */
+			if (s->send_skip_count++ < conn->settings.timeout_tick / 8)
+				return;
+			s->send_skip_count = 0;
+		}
 	}
+
 	_conn_udp_send(conn, &conn->udp_sock.addr);
 }
 
@@ -869,6 +992,7 @@ int32_t
 server_cli_sendmessage(netsrvclient_t *restrict client, const void *restrict buffer, const uint32_t size)
 {
 	if (!client) return -1;
+	if (client->common.status_local != EPROT_STATUS_CONNECTED) return -1;
 	return netmsg_enqueue(&client->msgctx, buffer, size);
 }
 
@@ -895,10 +1019,8 @@ client_init(const struct clievents events, const struct netsettings settings, vo
 		return NULL;
 	}
 
-	/* prepare first packet */
-	packet_w_16_t(conn->out_packet, &conn->tick_local);
-	packet_w_bits(conn->out_packet, conn->data.cli.common.status_local, EPROT_STATUS_SIZE);
-	conn->data.cli.events.onconnect(conn, conn->userdata, conn->in_packet, conn->out_packet);
+	/* call first onconnect */
+	_client_netmsg_pack_connect(&conn, NULL, 0);
 	return conn;
 }
 
@@ -920,6 +1042,7 @@ int32_t
 client_sendmessage(netconn_t *restrict conn, const void *restrict buffer, const uint32_t size)
 {
 	if (!conn) return -1;
+	if (conn->data.cli.common.status_local != EPROT_STATUS_CONNECTED) return -1;
 	return netmsg_enqueue(&conn->data.cli.msgctx, buffer, size);
 }
 

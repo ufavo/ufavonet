@@ -47,6 +47,11 @@ enum netconn_disconnect_reason
 
 enum netconn_connect_result
 {
+	/* Keep in pending state. 
+	 * `onconnect` will be called until `CONNECTION_ALLOW` or `CONNECTION_REFUSE` is returned.
+	 * Sends `out` packet if not empty.
+	 * `userdata` is assigned to this client. */
+	ECONNECTION_AGAIN = 0,
 	/* Allows the connection.
 	 * Sends `p_out` packet if not empty. 
 	 * `userdata` is assigned to this client. */
@@ -57,11 +62,6 @@ enum netconn_connect_result
 	 * `userdata` is assigned to this client.
 	 * `ondisconnect` is called as soon as this value is returned. */
 	ECONNECTION_REFUSE,
-	/* Keep in pending state. 
-	 * `onconnect` will be called until `CONNECTION_ALLOW` or `CONNECTION_REFUSE` is returned.
-	 * Sends `out` packet if not empty.
-	 * `userdata` is assigned to this client. */
-	ECONNECTION_AGAIN
 };
 
 enum netconn_protocol
