@@ -68,13 +68,14 @@ struct conncommon {
 	uint8_t 	status_remote;
 	uint8_t 	disconnect_reason;
 	uint8_t 	internal_onconnect_status;
+
+	netmsg_ctx_t 		msgctx;
 };
 
 /* struct that represents a client in the server */
 struct srvclient {
 	struct conncommon 	common;
 	usocket_addr_t 		sockaddr;
-	netmsg_ctx_t 		msgctx;
 	void 				*userdata;
 
 	/* Hash table stuff */
@@ -86,7 +87,6 @@ struct srvclient {
 struct cliconn {
 	struct clievents 	events;
 	struct conncommon 	common;	
-	netmsg_ctx_t 		msgctx;
 };
 
 /* struct that holds data needed by a server */
@@ -178,7 +178,7 @@ _server_client_free(netconn_t *restrict conn, netsrvclient_t *c)
 {
 	ulogf_dbg("Removed client: %s:%d", server_cli_get_addrstr(c), server_cli_get_port(c));
 	HASH_DEL(conn->data.srv.connected_clients, c);
-	netmsg_deinit(&c->msgctx);
+	netmsg_deinit(&c->common.msgctx);
 	ufree(c);
 }
 
@@ -192,7 +192,7 @@ _server_client_init(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr,
 	}
 	memset(client, 0, sizeof(*client));
 
-	if (!netmsg_init(&client->msgctx, 32)) {
+	if (!netmsg_init(&client->common.msgctx, 32)) {
 		ufree(client);
 		return NULL;
 	}
@@ -203,7 +203,7 @@ _server_client_init(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr,
 	HASH_ADD(hh, conn->data.srv.connected_clients, id, sizeof(cli_id), client);
 
 	if (ufavonet_global.uthash_oom) {
-		netmsg_deinit(&client->msgctx);
+		netmsg_deinit(&client->common.msgctx);
 		ufree(client);
 		ulogf_crt("uthash OOM");
 		ufavonet_global.uthash_oom = 0;
@@ -255,7 +255,7 @@ _client_disconnect(netconn_t **__conn, uint8_t reason)
 static inline int
 _server_netmsg_unpack_all(netconn_t *restrict conn, netsrvclient_t *restrict client, packet_t *restrict p_in)
 {
-	_conn_netmsg_unpack_all(&client->msgctx, p_in, {
+	_conn_netmsg_unpack_all(&client->common.msgctx, p_in, {
 		if (conn->data.srv.events.onreceivemsg)
 			conn->data.srv.events.onreceivemsg(conn, conn->userdata, data, size, client);
 	}, {
@@ -332,7 +332,7 @@ _server_netmsg_pack_connect(netconn_t *restrict conn, netsrvclient_t *restrict c
 		res = _server_onconnect_internal(conn, client, &pin, conn->out_packet);
 		if (res == ECONNECTION_ALLOW) {
 			if (packet_get_write_op_count(conn->out_packet))
-				netmsg_enqueue(&client->msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
+				netmsg_enqueue(&client->common.msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
 			client->common.internal_onconnect_status = 1;
 			return;
 		}
@@ -352,7 +352,7 @@ _server_netmsg_pack_connect(netconn_t *restrict conn, netsrvclient_t *restrict c
 			break;
 		case ECONNECTION_AGAIN:
 			if (packet_get_write_op_count(conn->out_packet))
-				netmsg_enqueue(&client->msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
+				netmsg_enqueue(&client->common.msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
 			break;
 	}
 }
@@ -361,7 +361,7 @@ static inline int
 _server_netmsg_unpack_onconnect(netconn_t *restrict conn, netsrvclient_t *restrict client, packet_t *restrict p_in)
 {
 	int once = 0;
-	_conn_netmsg_unpack_all(&client->msgctx, p_in, {
+	_conn_netmsg_unpack_all(&client->common.msgctx, p_in, {
 		if (once) {
 			ulogf_ntc("Protocol violation: Client sent more then one message at a time during connect stage.");
 			_server_client_disconnect(conn, client, EDISCONNECT_PROTOCOL_VIOLATION);
@@ -402,7 +402,7 @@ _client_netmsg_pack_connect(netconn_t **__conn, void *data, size_t size)
 		conn->data.cli.events.onconnect(conn, conn->userdata, &pin, conn->out_packet);
 	}
 	if (packet_get_write_op_count(conn->out_packet))
-		netmsg_enqueue(&conn->data.cli.msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
+		netmsg_enqueue(&conn->data.cli.common.msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
 
 	return 1;
 }
@@ -413,7 +413,7 @@ _client_netmsg_unpack_all(netconn_t **__conn, packet_t *restrict p_in)
 {
 	netconn_t *conn = *__conn;
 	int once = 0;
-	_conn_netmsg_unpack_all(&conn->data.cli.msgctx, p_in, {
+	_conn_netmsg_unpack_all(&conn->data.cli.common.msgctx, p_in, {
 		if (conn->data.cli.common.status_remote == EPROT_STATUS_CONNECT) {
 			if (once) {
 				ulogf_ntc("Protocol violation: Server sent more then one message at a time during connect stage.");
@@ -635,7 +635,7 @@ _server_process_send(netconn_t *restrict conn)
 		const uint32_t write_op_cnt = packet_get_write_op_count(conn->out_packet);
 
 		/* write messages */
-		int32_t err = netmsg_pack(&client->msgctx, conn->out_packet);
+		int32_t err = netmsg_pack(&client->common.msgctx, conn->out_packet);
 		if (err != ENETMSG_ERR_NONE) {
 			ulogf_crt("Failed to pack messages. Dropping connection. Err: %" PRIi32, err);
 			_server_client_disconnect(conn, client, EDISCONNECT_INTERNAL_ERROR);
@@ -767,7 +767,7 @@ _client_process_send(netconn_t **__conn)
 	const uint32_t write_op_cnt = packet_get_write_op_count(conn->out_packet);
 
 	/* write messages */
-	int32_t err = netmsg_pack(&conn->data.cli.msgctx, conn->out_packet);
+	int32_t err = netmsg_pack(&conn->data.cli.common.msgctx, conn->out_packet);
 	if (err != ENETMSG_ERR_NONE) {
 		ulogf_crt("Failed to pack messages. Dropping connection. Err: %" PRIi32, err);
 		_send_disconnect(conn, &conn->udp_sock.addr, EDISCONNECT_INTERNAL_ERROR);
@@ -993,7 +993,7 @@ server_cli_sendmessage(netsrvclient_t *restrict client, const void *restrict buf
 {
 	if (!client) return -1;
 	if (client->common.status_local != EPROT_STATUS_CONNECTED) return -1;
-	return netmsg_enqueue(&client->msgctx, buffer, size);
+	return netmsg_enqueue(&client->common.msgctx, buffer, size);
 }
 
 uint16_t
@@ -1014,7 +1014,7 @@ client_init(const struct clievents events, const struct netsettings settings, vo
 	if (!conn) return NULL;
 	conn->data.cli.events = events;
 	conn->type = ETYPE_CLIENT;
-	if (!netmsg_init(&conn->data.cli.msgctx, 128)) {
+	if (!netmsg_init(&conn->data.cli.common.msgctx, 128)) {
 		_conn_deinit(conn);
 		return NULL;
 	}
@@ -1043,7 +1043,7 @@ client_sendmessage(netconn_t *restrict conn, const void *restrict buffer, const 
 {
 	if (!conn) return -1;
 	if (conn->data.cli.common.status_local != EPROT_STATUS_CONNECTED) return -1;
-	return netmsg_enqueue(&conn->data.cli.msgctx, buffer, size);
+	return netmsg_enqueue(&conn->data.cli.common.msgctx, buffer, size);
 }
 
 uint16_t
