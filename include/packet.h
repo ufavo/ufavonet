@@ -89,7 +89,10 @@ uint32_t packet_get_readable(packet_t *restrict p);
 /* Returns the number of write operations performed on the packet since the last rewind/init */
 uint32_t packet_get_write_op_count(packet_t *restrict p);
 
-
+/* Ensures `size` bytes fits in the packet and points `*out` to the correct position in the backing buffer.
+ * After calling, the user is responsible to write to that region before calling any other write function.
+ * Returns `enum packeterr` error code. */
+int	packet_w_deferred(packet_t *restrict p, const size_t size, void **out);
 /* Adds `size` bytes from `ptr` to `p`.
  * Returns `enum packeterr` error code. */
 int packet_w(packet_t *restrict p, const void *restrict ptr, const size_t size);

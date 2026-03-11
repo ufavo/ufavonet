@@ -29,7 +29,7 @@
 #endif
 #include "_hooks.h"
 #include "../include/packet.h"
-#include "packet_internal.h"
+#include "_packet.h"
 
 #define ceil_int_division(A,B) ((A + (B-1)) / B)
 
@@ -194,46 +194,54 @@ packet_get_readable(packet_t *restrict p)
 	return p->length - p->index; 
 }
 
-uint32_t
+inline uint32_t
 packet_get_write_op_count(packet_t *restrict p)
 {
 	return p->write_op_count;
+}
+
+static inline int
+_packet_buffer_expand(packet_t *restrict p, const size_t size)
+{
+	if(p->size < p->index + size) {
+		if (p->realloc_allowed) {
+			size_t new_size = p->size + (PACKET_ALLOC_SIZE * ceil_int_division(size, PACKET_ALLOC_SIZE));
+
+			void *rallc = urealloc(p->data, new_size);
+			if (!rallc)
+				return EPACKET_ERR_OUT_OF_MEMORY;
+
+			p->data = rallc;
+			p->size = new_size;
+		} else {
+			return EPACKET_ERR_OUT_OF_BOUNDS;
+		}
+	}
+
+	return 0;
+}
+
+inline int
+packet_w_deferred(packet_t *restrict p, const size_t size, void **out)
+{
+	*out = NULL;
+
+	int err = _packet_buffer_expand(p, size);
+	if (err) return err;
+
+	*out = p->data + p->index;
+	p->index += size;
+	p->length = p->index;
+	return err;
 }
 
 inline int
 packet_w(packet_t *restrict p, const void *restrict ptr, const size_t size)
 {
 	if (!size) return 0;
+	int err = _packet_buffer_expand(p, size);
+	if (err) return err;
 
-	if(p->data) {
-		if(p->size <= p->index + size) {
-			if (p->realloc_allowed == 1) {
-				p->size += PACKET_ALLOC_SIZE * ceil_int_division(size, PACKET_ALLOC_SIZE);
-				void *rallc = urealloc(p->data, p->size);
-				if (rallc == NULL) {
-					ufree(p->data);
-					p->index = 0;
-					p->length = 0;
-					p->size = 0;
-					p->data = NULL;
-					return EPACKET_ERR_OUT_OF_MEMORY;
-				}
-				p->data = rallc;
-			} else {
-				return EPACKET_ERR_OUT_OF_BOUNDS;
-			}
-		} 
-	} else if (p->realloc_allowed == 1) {
-		p->size = PACKET_ALLOC_SIZE * ceil_int_division(size, PACKET_ALLOC_SIZE);
-		p->data = umalloc(p->size);
-		if (p->data == NULL) {
-			p->size = 0;
-			return EPACKET_ERR_OUT_OF_MEMORY;
-		}
-		p->index = 0;
-	} else {
-		return EPACKET_ERR_OUT_OF_BOUNDS;
-	}
 	memcpy(p->data + p->index, ptr, size);
 	p->index += size;
 	p->length = p->index;
