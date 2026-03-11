@@ -22,6 +22,7 @@
 #include "utime.h"
 #include "_packet.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +32,8 @@
 #include "_hooks.h"
 #include "usocket.c"
 #include "netmsg.h"
+#include "_crypto.h"
+#include "handshake.h"
 #include "../modules/uthash/src/uthash.h"
 #include "../include/net.h"
 
@@ -50,6 +53,13 @@ enum {
 	EPROT_STATUS_DISCONNECT_PENDING
 };
 
+enum {
+	EHANDSHAKE_STATUS_NONE = 0,
+	EHANDSHAKE_STATUS_TICK_SYNC,
+	EHANDSHAKE_STATUS_SERVER_OK,
+	EHANDSHAKE_STATUS_CLIENT_OK,
+};
+
 #define SERVER_BUFFER_LEN UINT16_MAX
 
 #define SOCKADDR_TO_KEY(sockaddr) \
@@ -67,9 +77,11 @@ struct conncommon {
 	uint8_t 	status_local;
 	uint8_t 	status_remote;
 	uint8_t 	disconnect_reason;
-	uint8_t 	internal_onconnect_status;
+	uint8_t 	handshake_status;
+	uint8_t 	secure;
 
 	netmsg_ctx_t 		msgctx;
+	crypto_ctx_t 		crypto;
 };
 
 /* struct that represents a client in the server */
@@ -86,7 +98,9 @@ struct srvclient {
 /* struct that holds data needed by a client */
 struct cliconn {
 	struct clievents 	events;
-	struct conncommon 	common;	
+	struct conncommon 	common;
+	handshake_t 		handshake;
+	uint8_t 			srv_public_key[crypto_box_PUBLICKEYBYTES];
 };
 
 /* struct that holds data needed by a server */
@@ -94,6 +108,7 @@ struct srvconn {
 	uint_fast8_t 		is_closing;
 	struct srvevents 	events;
 	struct srvclient 	*connected_clients;
+	crypto_keypair_t 	keypair;
 };
 
 /* struct that represents a connection, be it a server or a client. */
@@ -109,6 +124,8 @@ struct netconn {
 	struct netstats 	stats;
 	struct netsettings 	settings;
 	
+	const uint8_t 		*secure_ciphers;
+	
 	usocket_t 			udp_sock;
 
 	union {
@@ -120,9 +137,17 @@ struct netconn {
 
 	packet_t 			*in_packet;
 	packet_t 			*out_packet;
+	packet_t 			*payload_packet;
 	uint8_t 			in_buffer[65535];
 	uint8_t 			out_buffer[65535];
 };
+
+static inline int32_t
+tick_diff(uint16_t x, uint16_t y)
+{
+	int32_t z = x - y;
+	return z > 32768? z - 65536 : (z < -32768? z + 65536 : z);
+}
 
 /* a given tick is valid if (tick > last tick) && (tick <= expected + margin && tick >= expected - margin)  */
 static inline int
@@ -148,13 +173,119 @@ _conn_udp_send(netconn_t *restrict conn, usocket_addr_t *restrict addr)
 		conn->stats.total_sent_bytes += length;
 }
 
+static inline int
+_conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict c)
+{
+	int ret = tick_remote_applicable(c->tick_remote, c->tick_remote_latest, c->tick_local, conn->settings.expected_tick_tolerance) || c->tick_local_noresp_count > 16384;
+	if (!ret) return 0;
+
+	packet_rewind(conn->payload_packet);
+	int32_t nonce_diff = tick_diff(c->tick_remote, c->tick_remote_latest);
+	if (c->handshake_status >= EHANDSHAKE_STATUS_SERVER_OK) {
+		/* add rx nonce */
+		crypto_nonce_add(&c->crypto.rx, nonce_diff);
+		c->crypto.auth_rx.nonce += nonce_diff;
+
+		/* refuses unauthenticated packets after handshake */
+		if (c->secure == ESECURE_NONE)
+			return 0;
+	} else if (c->secure == ESECURE_NONE) {
+		/* passthrough */
+		ulogf_dbg("Received passthrough payload, remote: %d", c->tick_remote);
+		packet_rw_packet(conn->in_packet, conn->payload_packet, packet_get_readable(conn->in_packet));
+	}
+
+	if (c->secure == ESECURE_ENCRYPT) {
+		ulogf_dbg("Received: self_tick: %d, tick_remote: %d, rx nonce[0]: %d, diff: %d", conn->tick_local, c->tick_remote, c->crypto.rx.data[0], nonce_diff);
+		/* decrypt */
+		ret = !crypto_decrypt_packet(&c->crypto.rx, conn->in_packet, conn->payload_packet);
+
+	} else if (c->secure == ESECURE_AUTH) {
+		ulogf_dbg("Received authenticated payload");
+		uint8_t rx_hash[crypto_shorthash_BYTES];
+		uint8_t hash[crypto_shorthash_BYTES];
+		uint8_t *nonce = conn->in_packet->data + conn->in_packet->index;
+
+		/* store received hash */
+		if (packet_r(conn->in_packet, rx_hash, sizeof(rx_hash)))
+			return 0;
+
+		/* overwrite received hash with nonce */
+		memcpy(nonce, &c->crypto.auth_rx.nonce, sizeof(c->crypto.auth_rx.nonce));
+
+		/* hash */
+		if (crypto_shorthash(hash, conn->in_packet->data, conn->in_packet->length, c->crypto.auth_rx.key))
+			return 0;
+
+		/* verify authenticity */
+		if (memcmp(hash, rx_hash, sizeof(hash)) != 0)
+			return 0;
+
+		/* passthrough */
+		packet_rw_packet(conn->in_packet, conn->payload_packet, packet_get_readable(conn->in_packet));
+	}
+
+	packet_rewind(conn->payload_packet);
+	if (ret) {
+		c->tick_local 			= c->tick_remote;
+		c->tick_remote_latest 	= c->tick_remote;
+		c->tick_local_noresp_count = 0;
+	}
+	return ret;
+}
+
+static inline int
+_conn_payload_secure(netconn_t *restrict conn, struct conncommon *restrict c)
+{
+	packet_rewind(conn->payload_packet);
+	if (c->handshake_status == EHANDSHAKE_STATUS_CLIENT_OK) {
+		uint8_t secure = conn->settings.secure;
+		if (conn->payload_packet->length == 0)
+			secure = ESECURE_AUTH;
+
+		packet_w_bits(conn->out_packet, secure, 2);
+
+		if (secure == ESECURE_ENCRYPT) {
+			ulogf_dbg("Write encrypted; tick: %d, tick_local: %d, tx nonce[0]: %d", conn->tick_local, c->tick_local, c->crypto.tx.data[0]);
+			crypto_encrypt_packet(&c->crypto.tx, conn->payload_packet, conn->out_packet);
+		} else if (secure == ESECURE_AUTH) {
+			ulogf_dbg("Write authenticated");
+			uint8_t hash[crypto_shorthash_BYTES];
+
+			/* write nonce */
+			uint32_t nonce_idx = conn->out_packet->index;
+			packet_w(conn->out_packet, &c->crypto.auth_tx.nonce, sizeof(c->crypto.auth_tx.nonce));
+
+			/* write payload */
+			packet_rw_packet(conn->payload_packet, conn->out_packet, packet_get_length(conn->payload_packet));
+
+			/* hash */
+			crypto_shorthash(hash, conn->out_packet->data, conn->out_packet->length, c->crypto.auth_tx.key);
+
+			/* replace nonce with hash */
+			memcpy(conn->out_packet->data + nonce_idx, hash, sizeof(hash));
+
+		} else {
+			packet_rw_packet(conn->payload_packet, conn->out_packet, packet_get_length(conn->payload_packet));
+		}
+	} else {
+		ulogf_dbg("Write unauthenticated");
+		packet_w_bits(conn->out_packet, ESECURE_NONE, 2);
+		packet_rw_packet(conn->payload_packet, conn->out_packet, packet_get_length(conn->payload_packet));
+	}
+
+	return 1;
+}
+
 static inline void
-_send_disconnect(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr, uint8_t reason)
+_send_disconnect(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr, uint8_t reason, struct conncommon *restrict c)
 {
 	packet_rewind(conn->out_packet);
 	packet_w_16_t(conn->out_packet, &conn->tick_local);
 	packet_w_bits(conn->out_packet, EPROT_STATUS_DISCONNECT, EPROT_STATUS_SIZE);
-	packet_w_8_t(conn->out_packet, &reason);
+	packet_rewind(conn->payload_packet);
+	packet_w_8_t(conn->payload_packet, &reason);
+	if (c) _conn_payload_secure(conn, c);
 	_conn_udp_send(conn, cli_addr);
 	ulogf_dbg("Sent client disconnect: %s:%d", inet_ntoa(cli_addr->tcp_udp.sin_addr), ntohs(cli_addr->tcp_udp.sin_port));
 }
@@ -271,9 +402,47 @@ _server_netmsg_unpack_all(netconn_t *restrict conn, netsrvclient_t *restrict cli
 static inline int
 _server_onconnect_internal(netconn_t *restrict conn, netsrvclient_t *restrict client, packet_t *restrict p_in, packet_t *restrict p_out)
 {
+	int ret = ECONNECTION_AGAIN;
+	int err = handshake_server_onestep(p_in, p_out, &conn->data.srv.keypair,
+									conn->secure_ciphers, &client->common.crypto,
+									conn->tick_local, client->common.tick_remote,
+									!conn->settings.dont_distribute_public_key);
+	switch (err) {
+		case EHANDSHAKE_ERR_INPUT:
+			ulogf_err("Protocol violation during handshake");
+			client->common.disconnect_reason = EDISCONNECT_PROTOCOL_VIOLATION;
+			return ECONNECTION_REFUSE;
+
+		case EHANDSHAKE_ERR_INTERNAL:
+			ulogf_err("Internal error during handshake");
+			client->common.disconnect_reason = EDISCONNECT_INTERNAL_ERROR;
+			return ECONNECTION_REFUSE;
+
+		case EHANDSHAKE_ERR_REFUSED:
+			client->common.disconnect_reason = EDISCONNECT_WONT_GIVE_PUBLIC_KEY;
+			return ECONNECTION_REFUSE;
+
+		default:
+		case EHANDSHAKE_ERR_DECRYPT:
+		case EHANDSHAKE_ERR_CIPHERS:
+		case EHANDSHAKE_ERR_CHECKBYTES:
+			client->common.disconnect_reason = EDISCONNECT_HANDSHAKE;
+			return ECONNECTION_REFUSE;
+
+		case 1:
+			ret = ECONNECTION_ALLOW;
+			client->common.tick_local 			= client->common.tick_remote + 32768;
+			client->common.tick_remote_latest 	= client->common.tick_remote + 32768;
+			break;
+
+		case 0:
+			ret = ECONNECTION_AGAIN;
+			break;
+	}
+
 	// Announce server tickrate
 	packet_w_16_t(p_out, &conn->settings.tick_rate);
-	return ECONNECTION_ALLOW;
+	return ret;
 }
 
 static inline int
@@ -282,8 +451,50 @@ _client_onconnect_internal(netconn_t **__conn, packet_t *restrict p_in, packet_t
 	netconn_t *conn = *__conn;
 
 	int err = 0;
+	int ret = 1;
+	uint16_t crypto_start_remote_tick = 0;
+	uint16_t crypto_start_local_tick = 0;
+	err = handshake_client_step(&conn->data.cli.handshake, p_in, p_out,
+							 conn->data.cli.srv_public_key, conn->secure_ciphers,
+							 &conn->data.cli.common.crypto, &crypto_start_remote_tick,
+							 &crypto_start_local_tick);
+	switch (err) {
+		case EHANDSHAKE_ERR_INPUT:
+			ulogf_ntc("Protocol violation during handshake");
+			_client_disconnect(__conn, EDISCONNECT_PROTOCOL_VIOLATION);
+			return -1;
+		
+		case EHANDSHAKE_ERR_INTERNAL:
+			ulogf_err("Internal error during handshake");
+			_client_disconnect(__conn, EDISCONNECT_INTERNAL_ERROR);
+			return -1;
+		
+		default:
+		case EHANDSHAKE_ERR_CIPHERS:
+		case EHANDSHAKE_ERR_CHECKBYTES:
+			_client_disconnect(__conn, EDISCONNECT_HANDSHAKE);
+			return -1;
 
-	if (packet_get_length(p_in) == 0)
+		case 0:
+			/* Not done yet */
+			ret = 0;
+			break;
+
+		case 1: {
+			/* Server's tx nonce is always 1 ahead. Compensate for that in client's rx nonce. */
+			crypto_nonce_add(&conn->data.cli.common.crypto.rx, 1);
+			conn->data.cli.common.crypto.auth_rx.nonce += 1;
+			
+			/* sync with the tick at the server during handshake so that the rx nonce is kept in sync with the server's tx nonce */
+			conn->data.cli.common.tick_local = crypto_start_remote_tick;
+			conn->data.cli.common.tick_remote_latest = crypto_start_remote_tick;
+			/* bump local tick so that the server is able to sync it's rx nonce with the client's tx nonce */
+			conn->tick_local = crypto_start_local_tick + 32768 + 1;
+			break;
+		}
+	}
+
+	if (packet_get_readable(p_in) == 0)
 		return 0;
 
 	// Apply tickrate
@@ -304,11 +515,11 @@ _client_onconnect_internal(netconn_t **__conn, packet_t *restrict p_in, packet_t
 		conn->tick_time_target_us = 1000000L / server_tick_rate;
 		conn->settings.tick_rate = server_tick_rate;
 	}
-	return 1;
+	return ret;
 
 fail:
 	if (err == EPACKET_ERR_OUT_OF_BOUNDS) {
-		ulogf_ntc("Protocol violation during internal connect stage.");
+		ulogf_ntc("Protocol violation during internal connect stage");
 		_client_disconnect(__conn, EDISCONNECT_PROTOCOL_VIOLATION);
 	} else {
 		ulogf_err("Internal error during internal connect stage. packet err: %" PRIi32, err);
@@ -325,27 +536,27 @@ _server_netmsg_pack_connect(netconn_t *restrict conn, netsrvclient_t *restrict c
 	packet_set_length(&pin, size);
 	packet_rewind(conn->out_packet);
 
-	enum netconn_connect_result res = ECONNECTION_ALLOW;
+	enum netconn_connect_result res = ECONNECTION_REFUSE;
 
-	if (client->common.internal_onconnect_status == 0) {
+	if (client->common.handshake_status == EHANDSHAKE_STATUS_TICK_SYNC) {
 		// Internal onconnect
 		res = _server_onconnect_internal(conn, client, &pin, conn->out_packet);
+		client->common.tick_local_noresp_count = 0;
 		if (res == ECONNECTION_ALLOW) {
-			if (packet_get_write_op_count(conn->out_packet))
-				netmsg_enqueue(&client->common.msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
-			client->common.internal_onconnect_status = 1;
+			netmsg_enqueue(&client->common.msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
+			client->common.handshake_status = EHANDSHAKE_STATUS_SERVER_OK;
 			return;
 		}
-	} else if (conn->data.srv.events.onconnect) {
+	} else if (client->common.handshake_status == EHANDSHAKE_STATUS_SERVER_OK) {
+		/* client reached status CLIENT_OK. Start sending secure packets. */
+		client->common.handshake_status = EHANDSHAKE_STATUS_CLIENT_OK;
 		// User onconnect
-		res = conn->data.srv.events.onconnect(conn, conn->userdata, &pin, conn->out_packet, client, &client->userdata);
+		res = conn->data.srv.events.onconnect ? conn->data.srv.events.onconnect(conn, conn->userdata, &pin, conn->out_packet, client, &client->userdata) : ECONNECTION_ALLOW;
 	}
 
 	switch(res) {
 		case ECONNECTION_ALLOW:
-			client->common.status_local 		= EPROT_STATUS_CONNECTED;
-			client->common.tick_local 			= client->common.tick_remote;
-			client->common.tick_remote_latest 	= client->common.tick_remote;
+			client->common.status_local = EPROT_STATUS_CONNECTED;
 			break;
 		case ECONNECTION_REFUSE:
 			_server_client_disconnect(conn, client, EDISCONNECT_REFUSED);
@@ -376,9 +587,6 @@ _server_netmsg_unpack_onconnect(netconn_t *restrict conn, netsrvclient_t *restri
 		_server_client_disconnect(conn, client, EDISCONNECT_PROTOCOL_VIOLATION);
 		return 0;
 	});
-	if (!once) {
-		_server_netmsg_pack_connect(conn, client, NULL, 0);
-	}
 	return 1;
 }
 
@@ -392,16 +600,25 @@ _client_netmsg_pack_connect(netconn_t **__conn, void *data, size_t size)
 	packet_set_length(&pin, size);
 	packet_rewind(conn->out_packet);
 
-	if (!conn->data.cli.common.internal_onconnect_status) {
+	if (conn->data.cli.common.handshake_status <= EHANDSHAKE_STATUS_TICK_SYNC) {
+		conn->data.cli.common.tick_local_noresp_count = 0;
 		int res = _client_onconnect_internal(__conn, &pin, conn->out_packet);
-		if (res == 1)
-			conn->data.cli.common.internal_onconnect_status = 1;
-		else if (res < 0)
+		if (res == 1) {
+			conn->data.cli.common.handshake_status = EHANDSHAKE_STATUS_CLIENT_OK;
+
+			if (packet_get_write_op_count(conn->out_packet)) {
+				netmsg_enqueue(&conn->data.cli.common.msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
+				return 1;
+			}
+		} else if (res < 0)
 			return 0;
-	} else if (conn->data.cli.events.onconnect) {
-		conn->data.cli.events.onconnect(conn, conn->userdata, &pin, conn->out_packet);
 	}
-	if (packet_get_write_op_count(conn->out_packet))
+
+	if (conn->data.cli.common.handshake_status == EHANDSHAKE_STATUS_CLIENT_OK && conn->data.cli.events.onconnect)
+		conn->data.cli.events.onconnect(conn, conn->userdata, &pin, conn->out_packet);
+
+	/* always send a last message to let the server know when the client is done */
+	if (packet_get_write_op_count(conn->out_packet) || conn->data.cli.common.handshake_status == EHANDSHAKE_STATUS_CLIENT_OK)
 		netmsg_enqueue(&conn->data.cli.common.msgctx, conn->out_buffer, packet_get_length(conn->out_packet));
 
 	return 1;
@@ -439,7 +656,7 @@ _client_netmsg_unpack_all(netconn_t **__conn, packet_t *restrict p_in)
 
 
 static inline int
-_conn_recv(netconn_t *restrict conn, usocket_addr_t *restrict addr, uint16_t *restrict remote_tick, uint8_t *restrict remote_status)
+_conn_recv(netconn_t *restrict conn, usocket_addr_t *restrict addr, uint16_t *restrict remote_tick, uint8_t *restrict remote_status, uint8_t *restrict secure)
 {
 	ssize_t recvlen;
 	int err;
@@ -453,15 +670,32 @@ _conn_recv(netconn_t *restrict conn, usocket_addr_t *restrict addr, uint16_t *re
 	conn->stats.total_received_bytes += recvlen;
 	packet_rewind(conn->in_packet);
 	packet_set_length(conn->in_packet, recvlen);
+	packet_rewind(conn->payload_packet);
+	packet_set_length(conn->payload_packet, 0);
 
 	/* Read header */
 	err = packet_r_16_t(conn->in_packet, remote_tick);
 	if (err) return 0;
 	err = packet_r_bits(conn->in_packet, remote_status, EPROT_STATUS_SIZE);
 	if (err) return 0;
+	err = packet_r_bits(conn->in_packet, secure, 2);
+	if (err) return 0;
 
 	return 1;
 }
+
+static inline void
+_conncommon_tick(struct conncommon *restrict c)
+{
+	c->tick_local++;
+
+	if (c->handshake_status >= EHANDSHAKE_STATUS_SERVER_OK) {
+		/* Add tx nonce */
+		crypto_nonce_add(&c->crypto.tx, 1);
+		c->crypto.auth_tx.nonce += 1;
+	}
+}
+
 
 static inline netsrvclient_t *
 _server_recv(netconn_t *restrict conn)
@@ -470,8 +704,9 @@ _server_recv(netconn_t *restrict conn)
 
 	uint16_t 	remote_tick;
 	uint8_t 	remote_status;
+	uint8_t 	secure;
 
-	if (!_conn_recv(conn, &cli_addr, &remote_tick, &remote_status))
+	if (!_conn_recv(conn, &cli_addr, &remote_tick, &remote_status, &secure))
 		return NULL;
 
 
@@ -481,10 +716,10 @@ _server_recv(netconn_t *restrict conn)
 	HASH_FIND(hh, conn->data.srv.connected_clients, &cli_id, sizeof(cli_id), client);
 
 	if (!client) {
-		if (remote_status != EPROT_STATUS_CONNECT) {
+		if (remote_status != EPROT_STATUS_CONNECT || secure != ESECURE_NONE) {
 			ulogf_dbg("Client already disconnected");
 			/* Already disconnected. Reinforce disconnection. */
-			_send_disconnect(conn, &cli_addr, EDISCONNECT_NONE);
+			_send_disconnect(conn, &cli_addr, EDISCONNECT_NONE, NULL);
 			return NULL;
 		}
 
@@ -494,16 +729,19 @@ _server_recv(netconn_t *restrict conn)
 		/* initialize client */
 		client = _server_client_init(conn, &cli_addr, cli_id);
 		if (!client) {
-			_send_disconnect(conn, &cli_addr, EDISCONNECT_INTERNAL_ERROR);
+			_send_disconnect(conn, &cli_addr, EDISCONNECT_INTERNAL_ERROR, NULL);
 			ulogf_wrn("Failed to initialize client");
 			return NULL;
 		}
 		client->common.tick_remote_latest	= remote_tick;
 		client->common.tick_local			= remote_tick;
+		/* the client is the one that needs to catch up with the server */
+		client->common.handshake_status 	= EHANDSHAKE_STATUS_TICK_SYNC;
 	}
 
 	client->common.tick_remote = remote_tick;
 	client->common.status_remote = remote_status;
+	client->common.secure = secure;
 	return client;
 }
 
@@ -515,6 +753,9 @@ _server_process_recv(netconn_t *restrict conn)
 	for (i = 2; i;) {
 		netsrvclient_t *c = _server_recv(conn);
 		if (!c) { i--; continue; }
+		
+		int applicable = _conn_payload_from_secure(conn, &c->common);
+		if (!applicable) continue;
 
 		/* handle disconnection */
 		if (c->common.status_remote == EPROT_STATUS_DISCONNECT) {
@@ -523,10 +764,10 @@ _server_process_recv(netconn_t *restrict conn)
 				ulogf_dbg("Client initiated disconnection");
 				uint8_t reason;
 				/* Fallback to generic disconnect if reading the reason fails. */
-				if (packet_r_8_t(conn->in_packet, &reason))
+				if (packet_r_8_t(conn->payload_packet, &reason))
 					reason = EDISCONNECT;
 				_server_client_disconnect(conn, c, reason);
-				_send_disconnect(conn, &c->sockaddr, reason);
+				_send_disconnect(conn, &c->sockaddr, reason, &c->common);
 			}
 			_server_client_free(conn, c);	
 			continue;
@@ -547,30 +788,19 @@ _server_process_recv(netconn_t *restrict conn)
 		/* handle connect */
 		if (c->common.status_remote == EPROT_STATUS_CONNECT) {
 			if (c->common.status_local == EPROT_STATUS_CONNECT) {
-				_server_netmsg_unpack_onconnect(conn, c, conn->in_packet);
+				_server_netmsg_unpack_onconnect(conn, c, conn->payload_packet);
 				continue;
 			}
 		}
 
-
-		uint8_t tick_applicable = tick_remote_applicable(c->common.tick_remote, c->common.tick_remote_latest, c->common.tick_local, conn->settings.expected_tick_tolerance);
+		/* handle messages */
+		if (!_server_netmsg_unpack_all(conn, c, conn->payload_packet)) {
+			/* error. client being dropped. */
+			continue;
+		}
 
 		/* handle default EPROT_STATUS_CONNECTED behaviour */
-		if (tick_applicable || c->common.tick_local_noresp_count > 16384) {
-			c->common.tick_local 			= c->common.tick_remote;
-			c->common.tick_remote_latest 	= c->common.tick_remote;
-
-			/* handle messages */
-			if (!_server_netmsg_unpack_all(conn, c, conn->in_packet)) {
-				/* error. client being dropped. */
-				continue;
-			}
-
-			/* call onreceive */
-			conn->data.srv.events.onreceivepkt(conn, conn->userdata, conn->in_packet, c, c->userdata);
-
-			c->common.tick_local_noresp_count = 0;
-		}
+		conn->data.srv.events.onreceivepkt(conn, conn->userdata, conn->payload_packet, c, c->userdata);
 
 		i = 2;
 	}
@@ -590,7 +820,7 @@ _server_process_send(netconn_t *restrict conn)
 	for (client = conn->data.srv.connected_clients; client; ) {
 		
 		/* client tick */
-		client->common.tick_local++;
+		_conncommon_tick(&client->common);
 
 		/* handle server kick */
 		if (client->common.status_local == EPROT_STATUS_DISCONNECT_PENDING)
@@ -608,7 +838,7 @@ _server_process_send(netconn_t *restrict conn)
 				_server_client_free(conn, c);
 				goto next_client;
 			}
-			_send_disconnect(conn, &client->sockaddr, client->common.disconnect_reason);
+			_send_disconnect(conn, &client->sockaddr, client->common.disconnect_reason, &client->common);
 			goto next_client;
 		}
 
@@ -618,7 +848,7 @@ _server_process_send(netconn_t *restrict conn)
 
 			const uint16_t timeout_ticks = client->common.status_local == EPROT_STATUS_CONNECT? conn->settings.pending_conn_timeout_tick : conn->settings.timeout_tick;
 			if (client->common.tick_local_noresp_count == timeout_ticks) {
-				_send_disconnect(conn, &client->sockaddr, client->common.disconnect_reason);
+				_send_disconnect(conn, &client->sockaddr, client->common.disconnect_reason, &client->common);
 				_server_client_disconnect(conn, client, EDISCONNECT_TIMEOUT);
 				goto next_client;
 			}
@@ -631,26 +861,25 @@ _server_process_send(netconn_t *restrict conn)
 		packet_rewind(conn->out_packet);
 		packet_w_16_t(conn->out_packet, &conn->tick_local);
 		packet_w_bits(conn->out_packet, client->common.status_local, EPROT_STATUS_SIZE);
-		
-		const uint32_t write_op_cnt = packet_get_write_op_count(conn->out_packet);
+		packet_rewind(conn->payload_packet);
 
 		/* write messages */
-		int32_t err = netmsg_pack(&client->common.msgctx, conn->out_packet);
+		int32_t err = netmsg_pack(&client->common.msgctx, conn->payload_packet);
 		if (err != ENETMSG_ERR_NONE) {
 			ulogf_crt("Failed to pack messages. Dropping connection. Err: %" PRIi32, err);
 			_server_client_disconnect(conn, client, EDISCONNECT_INTERNAL_ERROR);
-			_send_disconnect(conn, &client->sockaddr, EDISCONNECT_INTERNAL_ERROR);
+			_send_disconnect(conn, &client->sockaddr, EDISCONNECT_INTERNAL_ERROR, &client->common);
 			continue;
 		}
 
 		if (client->common.status_local == EPROT_STATUS_CONNECTED) {
 			/* call onsend. only for connected clients. */
-			conn->data.srv.events.onsendpkt(conn, conn->userdata, conn->out_packet, client, client->userdata);
+			conn->data.srv.events.onsendpkt(conn, conn->userdata, conn->payload_packet, client, client->userdata);
 
 			/* netmsg_pack() always perform at least one write operation.
 			 * The packet must be sent if netmsg_pack() performed more then
 			 * one write or onsendpkt() performed one or more writes. */
-			if (packet_get_write_op_count(conn->out_packet) == write_op_cnt + 1) {
+			if (packet_get_write_op_count(conn->payload_packet) == 1) {
 				/* avoid sending empty packets if possible */
 				if (client->common.send_skip_count++ < conn->settings.timeout_tick / 8)
 					goto next_client;
@@ -658,6 +887,7 @@ _server_process_send(netconn_t *restrict conn)
 			}
 		}
 
+		_conn_payload_secure(conn, &client->common);
 		_conn_udp_send(conn, &client->sockaddr);
 
 next_client:
@@ -676,8 +906,18 @@ _client_process_recv(netconn_t **__conn)
 		return;
 
 	while (1) {
-		if (!_conn_recv(conn, &conn->udp_sock.addr, &s->tick_remote, &s->status_remote))
+		if (!_conn_recv(conn, &conn->udp_sock.addr, &s->tick_remote, &s->status_remote, &s->secure))
 			return;
+
+		/* sync first tick */
+		if (s->handshake_status == EHANDSHAKE_STATUS_NONE) {
+			s->tick_local 			= s->tick_remote;
+			s->tick_remote_latest 	= s->tick_remote;
+			s->handshake_status 	= EHANDSHAKE_STATUS_TICK_SYNC;
+		}
+		
+		int applicable = _conn_payload_from_secure(conn, s);
+		if (!applicable) continue;
 
 		/* handle disconnection */
 		if (s->status_local == EPROT_STATUS_DISCONNECT)
@@ -685,36 +925,25 @@ _client_process_recv(netconn_t **__conn)
 
 		if (s->status_remote == EPROT_STATUS_DISCONNECT) {
 			uint8_t reason;
-			if (packet_r_8_t(conn->in_packet, &reason))
+			if (packet_r_8_t(conn->payload_packet, &reason))
 				reason = EDISCONNECT;
 			/* report back to the server */
-			_send_disconnect(conn, &conn->udp_sock.addr, reason);
+			_send_disconnect(conn, &conn->udp_sock.addr, reason, s);
 			_client_disconnect(__conn, reason);
 			return;
 		}
 
 		/* handle messages */
-		if (!_client_netmsg_unpack_all(__conn, conn->in_packet)) {
+		if (!_client_netmsg_unpack_all(__conn, conn->payload_packet)) {
 			/* error. connection being dropped. */
 			return;
 		}
 
-		uint8_t tick_applicable = tick_remote_applicable(s->tick_remote, s->tick_remote_latest, s->tick_local, conn->settings.expected_tick_tolerance);
-
-
-		/* apply */
-		if (tick_applicable) {
-			s->tick_remote_latest 		= s->tick_remote;
-			s->tick_local 				= s->tick_remote;
-			s->tick_local_noresp_count	= 0;
-			s->status_local 			= s->status_remote;
-
-			if (s->status_remote == EPROT_STATUS_CONNECT)
-				continue;
-			
-			/* call onreceive */
-			conn->data.cli.events.onreceivepkt(conn, conn->userdata, conn->in_packet);
-		}
+		s->status_local = s->status_remote;
+		if (s->status_remote == EPROT_STATUS_CONNECT)
+			continue;
+		
+		conn->data.cli.events.onreceivepkt(conn, conn->userdata, conn->payload_packet);
 	}
 }
 
@@ -728,7 +957,7 @@ _client_process_send(netconn_t **__conn)
 	struct conncommon *s = &conn->data.cli.common;
 
 	/* server tick */
-	conn->data.cli.common.tick_local++;
+	_conncommon_tick(s);
 
 	/* Handle disconnect */
 	if (s->status_remote == EPROT_STATUS_DISCONNECT) {
@@ -743,7 +972,7 @@ _client_process_send(netconn_t **__conn)
 			_client_disconnect(__conn, s->disconnect_reason);
 			return;
 		}
-		_send_disconnect(conn, &conn->udp_sock.addr, conn->data.cli.common.disconnect_reason);
+		_send_disconnect(conn, &conn->udp_sock.addr, conn->data.cli.common.disconnect_reason, s);
 		return;
 	}
 
@@ -763,26 +992,25 @@ _client_process_send(netconn_t **__conn)
 	packet_rewind(conn->out_packet);
 	packet_w_16_t(conn->out_packet, &conn->tick_local);
 	packet_w_bits(conn->out_packet, s->status_local, EPROT_STATUS_SIZE);
-
-	const uint32_t write_op_cnt = packet_get_write_op_count(conn->out_packet);
+	packet_rewind(conn->payload_packet);
 
 	/* write messages */
-	int32_t err = netmsg_pack(&conn->data.cli.common.msgctx, conn->out_packet);
+	int32_t err = netmsg_pack(&conn->data.cli.common.msgctx, conn->payload_packet);
 	if (err != ENETMSG_ERR_NONE) {
 		ulogf_crt("Failed to pack messages. Dropping connection. Err: %" PRIi32, err);
-		_send_disconnect(conn, &conn->udp_sock.addr, EDISCONNECT_INTERNAL_ERROR);
+		_send_disconnect(conn, &conn->udp_sock.addr, EDISCONNECT_INTERNAL_ERROR, s);
 		_client_disconnect(__conn, EDISCONNECT_INTERNAL_ERROR);
 		return;
 	}
 
 	if (s->status_local != EPROT_STATUS_CONNECT) {
 		/* call onsend */
-		conn->data.cli.events.onsendpkt(conn, conn->userdata, conn->out_packet);
+		conn->data.cli.events.onsendpkt(conn, conn->userdata, conn->payload_packet);
 
 		/* netmsg_pack() always perform at least one write operation.
 		 * The packet must be sent if netmsg_pack() performed more then
 		 * one write or onsendpkt() performed one or more writes. */
-		if (packet_get_write_op_count(conn->out_packet) == write_op_cnt + 1) {
+		if (packet_get_write_op_count(conn->payload_packet) == 1) {
 			/* avoid sending empty packets if possible */
 			if (s->send_skip_count++ < conn->settings.timeout_tick / 8)
 				return;
@@ -790,12 +1018,16 @@ _client_process_send(netconn_t **__conn)
 		}
 	}
 
+	_conn_payload_secure(conn, s);
 	_conn_udp_send(conn, &conn->udp_sock.addr);
 }
 
 static inline netconn_t *
 _conn_init(const struct netsettings settings, void *userdata)
 {
+	assert(NETCONN_SECURE_KEYPAIR_SIZE == (crypto_box_PUBLICKEYBYTES + crypto_box_SECRETKEYBYTES));
+	if (!crypto_init()) return NULL;
+
 	netconn_t *conn = umalloc(sizeof(*conn));
 	if (!conn) {
 		ulogf_crt("Failed to allocate memory for netconn_t");
@@ -828,6 +1060,8 @@ _conn_init(const struct netsettings settings, void *userdata)
 
 	conn->in_packet = packet_init_from_buff(conn->in_buffer, sizeof(conn->in_buffer));
 	conn->out_packet = packet_init_from_buff(conn->out_buffer, sizeof(conn->out_buffer));
+	conn->payload_packet = packet_init_prealloc(65535);
+	conn->secure_ciphers = crypto_cipher_benchmark(128);
 	
 	return conn;
 }
@@ -838,6 +1072,7 @@ _conn_deinit(netconn_t *conn)
 	usock_udp_deinit(&conn->udp_sock);
 	packet_free(&conn->in_packet);
 	packet_free(&conn->out_packet);
+	packet_free(&conn->payload_packet);
 	ufree(conn);
 }
 
@@ -897,7 +1132,7 @@ server_cleanup(netconn_t *c)
 		for (client = c->data.srv.connected_clients; client != NULL; ) {
 			/* anounce disconnect if not disconnected yet */
 			if (client->common.status_local != EPROT_STATUS_DISCONNECT)
-				_send_disconnect(c, &client->sockaddr, EDISCONNECT_SERVER_CLOSING);
+				_send_disconnect(c, &client->sockaddr, EDISCONNECT_SERVER_CLOSING, &client->common);
 
 			/* free client */
 			_server_client_free(c, client);
@@ -918,6 +1153,40 @@ server_init(const struct srvevents events, const struct netsettings settings, vo
 	conn->data.srv.events = events;
 	conn->type = ETYPE_SERVER;
 	return conn;
+}
+
+int
+server_secure_keypair_generate(netconn_t *restrict conn)
+{
+	if (!conn) return 0;
+	if (conn->type != ETYPE_SERVER) return 0;
+
+	ulogf_ntc("Generating new keypair");
+	if (crypto_box_keypair(conn->data.srv.keypair.pk, conn->data.srv.keypair.sk)) {
+		ulogf_err("Failed to generate keypair");
+		return 0;
+	}
+	return 1;
+}
+
+int
+server_secure_keypair_import(netconn_t *restrict conn, const uint8_t *restrict in_keypair)
+{
+	if (!conn) return 0;
+	if (conn->type != ETYPE_SERVER) return 0;
+	memcpy(conn->data.srv.keypair.pk, in_keypair, sizeof(conn->data.srv.keypair.pk));
+	memcpy(conn->data.srv.keypair.sk, in_keypair + sizeof(conn->data.srv.keypair.pk), sizeof(conn->data.srv.keypair.sk));
+	return 1;
+}
+
+int
+server_secure_keypair_export(netconn_t *restrict conn, uint8_t *restrict out_keypair)
+{
+	if (!conn) return 0;
+	if (conn->type != ETYPE_SERVER) return 0;
+	memcpy(out_keypair, conn->data.srv.keypair.pk, sizeof(conn->data.srv.keypair.pk));
+	memcpy(out_keypair + sizeof(conn->data.srv.keypair.pk), conn->data.srv.keypair.sk, sizeof(conn->data.srv.keypair.sk));
+	return 1;
 }
 
 int
@@ -1022,6 +1291,15 @@ client_init(const struct clievents events, const struct netsettings settings, vo
 	/* call first onconnect */
 	_client_netmsg_pack_connect(&conn, NULL, 0);
 	return conn;
+}
+
+int
+client_secure_pubkey_import(netconn_t *restrict conn, const uint8_t *restrict in_pubkey)
+{
+	if (!conn) return 0;
+	if (conn->type != ETYPE_CLIENT) return 0;
+	memcpy(conn->data.cli.srv_public_key, in_pubkey, sizeof(conn->data.cli.srv_public_key));
+	return 1;
 }
 
 int

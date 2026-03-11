@@ -39,6 +39,12 @@ enum netconn_disconnect_reason
 	EDISCONNECT_INTERNAL_ERROR,
 	/* From the server pov the client violated the protocol. */
 	EDISCONNECT_PROTOCOL_VIOLATION,
+	/* Handshake failed. */
+	EDISCONNECT_HANDSHAKE,
+	/* The server refused to give it's public key. */
+	EDISCONNECT_WONT_GIVE_PUBLIC_KEY,
+	/* RX or TX nonces got desynced for some reason and no further cryptographic operations can be performed */
+	EDISCONNECT_SECURE_DESYNC,
 
 	/* Reserved range for application defined reasons */
 	EDISCONNECT_APP_CUSTOM_START	= 64,
@@ -69,6 +75,17 @@ enum netconn_protocol
 	EPROTO_UDP = 0,
 };
 
+enum netconn_secure
+{
+	ESECURE_ENCRYPT = 0,
+	ESECURE_NONE,
+	ESECURE_AUTH,
+};
+
+#define NETCONN_SECURE_PK_SIZE 32
+#define NETCONN_SECURE_SK_SIZE 32
+#define NETCONN_SECURE_KEYPAIR_SIZE (NETCONN_SECURE_PK_SIZE + NETCONN_SECURE_SK_SIZE)
+
 typedef struct netconn netconn_t;
 typedef struct srvclient netsrvclient_t;
 
@@ -93,6 +110,12 @@ struct netsettings {
 	uint16_t 	expected_tick_tolerance;
 	/* How many times per second a tick is processed. Only applies to `conn_process_*` functions. */
 	uint16_t 	tick_rate;
+
+	/* Determines the security of outgoing packets. After the handshake only authenticated or encrypted packets are accepted.
+	 * See `enum netconn_secure`. Defaults to `ESECURE_ENCRYPT` */
+	uint8_t 	secure;
+	/* When set the server doesn't distribute it's public key to clients */
+	uint8_t 	dont_distribute_public_key;
 };
 
 struct srvevents {
@@ -147,6 +170,16 @@ struct netstats {
 };
 
 netconn_t *server_init(const struct srvevents events, const struct netsettings settings, void *userdata);
+/* Generates a new keypair.
+ * Returns 1 on success and 0 on failure. */
+int server_secure_keypair_generate(netconn_t *restrict conn);
+/* Reads `NETCONN_SECURE_KEYPAIR_SIZE` bytes from `in_keypair`.
+ * Returns 1 on success and 0 on failure. */
+int server_secure_keypair_import(netconn_t *restrict conn, const uint8_t *restrict in_keypair);
+/* Writes `NETCONN_SECURE_KEYPAIR_SIZE` bytes to `out_keypair`.
+ * The public key is in the first `NETCONN_SECURE_PK_SIZE` bytes.
+ * Returns 1 on success and 0 on failure. */
+int server_secure_keypair_export(netconn_t *restrict conn, uint8_t *restrict out_keypair);
 /* Opens and binds a socket with given protocol, hostname and port.
  * Must not be called again after success.
  * Returns 1 on success and 0 on failure. */
@@ -158,6 +191,9 @@ void server_close(netconn_t *restrict conn, uint8_t restarting);
 void server_cli_disconnect(netsrvclient_t *restrict client, enum netconn_disconnect_reason reason);
 
 netconn_t *client_init(const struct clievents events, const struct netsettings settings, void *userdata);
+/* Reads `NETCONN_SECURE_PK_SIZE` bytes from `in_pubkey`.
+ * Returns 1 on success and 0 on failure. */
+int client_secure_pubkey_import(netconn_t *restrict conn, const uint8_t *restrict in_pubkey);
 /* Opens and binds a socket with given protocol, hostname and port.
  * Must not be called again after success.
  * Returns 1 on success and 0 on failure. */
