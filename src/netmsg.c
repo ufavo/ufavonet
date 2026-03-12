@@ -165,7 +165,9 @@ pkt_unpack_ackgroup(netmsg_ctx_t *restrict ctx, packet_t *restrict p)
 	ulogf_dbg("Ack group range. From: %" PRIu8 " To: %" PRIu8, start, (uint8_t)start+count);
 
 	if (count+1 > NETMSG_MAX_SEND_PACK_CNT) return ENETMSG_ERR_INVALID;
-	
+
+	if (ctx->pack_cnt == 0) return ENETMSG_ERR_NONE;
+
 	packet_rewind(ctx->pkt);
 
 	uint8_t i, found;
@@ -185,6 +187,9 @@ pkt_unpack_ackgroup(netmsg_ctx_t *restrict ctx, packet_t *restrict p)
 				packet_rewind(ctx->pkt);
 				continue;
 			}
+			// case 3: gid possibly already ack'ed previously (allow a small window)
+			if (gid > start && gid - start <= (NETMSG_MAX_SEND_PACK_CNT / 2))
+				continue;
 			ulogf_inf("Sender ACK'ed an out of order gid that was never sent.");
 			return ENETMSG_ERR_INVALID;
 		}
@@ -196,9 +201,9 @@ pkt_unpack_ackgroup(netmsg_ctx_t *restrict ctx, packet_t *restrict p)
 
 		if (packet_get_readable(ctx->pkt) == 0) {
 			if (i == count) break;
-			else return ENETMSG_ERR_INVALID;
 		}
 	}
+	if (!found) return ENETMSG_ERR_NONE;
 
 	// remove acknowledged payload from the pending packet
 	uint8_t *pktstart = packet_get_buff(ctx->pkt);
@@ -272,6 +277,7 @@ netmsg_unpack_next(netmsg_ctx_t *restrict ctx, packet_t *restrict p, void **out,
 					ulogf_dbg("Skip gid: %d", (int)hasmsg);
 					err = pkt_unpack_group_skip(p);
 					if (err) {
+						ulogf_err("Failed attempt to skip gid: %d", (int)hasmsg);
 						ctx->unpack_cnt = 0;
 						return err;
 					}
