@@ -1348,6 +1348,9 @@ conn_free(netconn_t **conn)
 	if ((*conn)->type == ETYPE_SERVER)
 		server_cleanup(*conn);
 
+	if ((*conn)->type == ETYPE_CLIENT)
+		netmsg_deinit(&(*conn)->data.cli.common.msgctx);
+
 	_conn_deinit(*conn);
 	*conn = NULL;
 }
