@@ -187,8 +187,12 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 		c->crypto.auth_rx.nonce += nonce_diff;
 
 		/* refuses unauthenticated packets after handshake */
-		if (c->secure == ESECURE_NONE)
+		if (c->secure == ESECURE_NONE) {
+			c->tick_local 			= c->tick_remote;
+			c->tick_remote_latest 	= c->tick_remote;
+			c->tick_local_noresp_count = 0;
 			return 0;
+		}
 	} else if (c->secure == ESECURE_NONE) {
 		/* passthrough */
 		ulogf_dbg("Received passthrough payload, remote: %d", c->tick_remote);
