@@ -23,6 +23,7 @@
 #include "_packet.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,19 +67,29 @@ enum {
     ((((uint64_t)(sockaddr.sin_addr.s_addr)) << 16) | \
      ((uint64_t)(sockaddr.sin_port)))
 
+typedef struct {
+	uint16_t 	tick;
+	uint8_t 	status;
+	uint8_t 	secure;
+	uint8_t 	round_trip_flag;
+	uint8_t 	round_trip_flag_echo;
+} conn_header_t;
+
 /* struct that holds common data */
 struct conncommon {
+	conn_header_t remote;
 	uint16_t 	tick_local_noresp_count;
 	uint16_t 	tick_local;
 	uint16_t 	tick_remote_latest;
-	uint16_t 	tick_remote;
 	uint16_t 	send_skip_count;
 
-	uint8_t 	status_local;
-	uint8_t 	status_remote;
+	uint8_t 	status;
 	uint8_t 	disconnect_reason;
 	uint8_t 	handshake_status;
-	uint8_t 	secure;
+	uint8_t 	round_trip_flag_expected;
+	uint8_t 	round_trip_counter;
+	uint8_t 	round_trip_ticks;
+	float 		round_trip_ticks_ema;
 
 	netmsg_ctx_t 		msgctx;
 	crypto_ctx_t 		crypto;
@@ -123,6 +134,7 @@ struct netconn {
 	
 	struct netstats 	stats;
 	struct netsettings 	settings;
+	float 				rtt_ema_alpha;
 	
 	const uint8_t 		*secure_ciphers;
 	
@@ -141,6 +153,18 @@ struct netconn {
 	uint8_t 			in_buffer[65535];
 	uint8_t 			out_buffer[65535];
 };
+
+static inline float
+ema(float alpha, float late_ema, float sample)
+{
+	return (sample * alpha) + (late_ema * (1.0f - alpha));
+}
+
+static inline float
+ema_alpha(float n)
+{
+	return 2.0f / (n + 1.0f);
+}
 
 static inline int32_t
 tick_diff(uint16_t x, uint16_t y)
@@ -173,38 +197,50 @@ _conn_udp_send(netconn_t *restrict conn, usocket_addr_t *restrict addr)
 		conn->stats.total_sent_bytes += length;
 }
 
+static inline void
+_conn_prepare_outpkt(netconn_t *restrict conn, struct conncommon *restrict c)
+{
+	packet_rewind(conn->out_packet);
+	packet_w_16_t(conn->out_packet, &conn->tick_local);
+	packet_w_bits(conn->out_packet, c->status, EPROT_STATUS_SIZE);
+	packet_w_bits(conn->out_packet, c->round_trip_flag_expected, 1);
+	packet_w_bits(conn->out_packet, c->remote.round_trip_flag_echo, 1);
+	/* secure bits are written at _conn_payload_secure */
+	packet_rewind(conn->payload_packet);
+}
+
 static inline int
 _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict c)
 {
-	int ret = tick_remote_applicable(c->tick_remote, c->tick_remote_latest, c->tick_local, conn->settings.expected_tick_tolerance) || c->tick_local_noresp_count > 16384;
+	int ret = tick_remote_applicable(c->remote.tick, c->tick_remote_latest, c->tick_local, conn->settings.expected_tick_tolerance) || c->tick_local_noresp_count > 16384;
 	if (!ret) return 0;
 
 	packet_rewind(conn->payload_packet);
-	int32_t nonce_diff = tick_diff(c->tick_remote, c->tick_remote_latest);
+	int32_t nonce_diff = tick_diff(c->remote.tick, c->tick_remote_latest);
 	if (c->handshake_status >= EHANDSHAKE_STATUS_SERVER_OK) {
 		/* add rx nonce */
 		crypto_nonce_add(&c->crypto.rx, nonce_diff);
 		c->crypto.auth_rx.nonce += nonce_diff;
 
 		/* refuses unauthenticated packets after handshake */
-		if (c->secure == ESECURE_NONE) {
-			c->tick_local 			= c->tick_remote;
-			c->tick_remote_latest 	= c->tick_remote;
+		if (c->remote.secure == ESECURE_NONE) {
+			c->tick_local 			= c->remote.tick;
+			c->tick_remote_latest 	= c->remote.tick;
 			c->tick_local_noresp_count = 0;
 			return 0;
 		}
-	} else if (c->secure == ESECURE_NONE) {
+	} else if (c->remote.secure == ESECURE_NONE) {
 		/* passthrough */
-		ulogf_dbg("Received passthrough payload, remote: %d", c->tick_remote);
+		ulogf_dbg("Received passthrough payload, remote: %d", c->remote.tick);
 		packet_rw_packet(conn->in_packet, conn->payload_packet, packet_get_readable(conn->in_packet));
 	}
 
-	if (c->secure == ESECURE_ENCRYPT) {
-		ulogf_dbg("Received: self_tick: %d, tick_remote: %d, rx nonce[0]: %d, diff: %d", conn->tick_local, c->tick_remote, c->crypto.rx.data[0], nonce_diff);
+	if (c->remote.secure == ESECURE_ENCRYPT) {
+		ulogf_dbg("Received: self_tick: %d, tick_remote: %d, rx nonce[0]: %d, diff: %d", conn->tick_local, c->remote.tick, c->crypto.rx.data[0], nonce_diff);
 		/* decrypt */
 		ret = !crypto_decrypt_packet(&c->crypto.rx, conn->in_packet, conn->payload_packet);
 
-	} else if (c->secure == ESECURE_AUTH) {
+	} else if (c->remote.secure == ESECURE_AUTH) {
 		ulogf_dbg("Received authenticated payload");
 		uint8_t rx_hash[crypto_shorthash_BYTES];
 		uint8_t hash[crypto_shorthash_BYTES];
@@ -231,8 +267,8 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 
 	packet_rewind(conn->payload_packet);
 	if (ret) {
-		c->tick_local 			= c->tick_remote;
-		c->tick_remote_latest 	= c->tick_remote;
+		c->tick_local 			= c->remote.tick;
+		c->tick_remote_latest 	= c->remote.tick;
 		c->tick_local_noresp_count = 0;
 	}
 	return ret;
@@ -284,12 +320,9 @@ _conn_payload_secure(netconn_t *restrict conn, struct conncommon *restrict c)
 static inline void
 _send_disconnect(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr, uint8_t reason, struct conncommon *restrict c)
 {
-	packet_rewind(conn->out_packet);
-	packet_w_16_t(conn->out_packet, &conn->tick_local);
-	packet_w_bits(conn->out_packet, EPROT_STATUS_DISCONNECT, EPROT_STATUS_SIZE);
-	packet_rewind(conn->payload_packet);
+	_conn_prepare_outpkt(conn, c);
 	packet_w_8_t(conn->payload_packet, &reason);
-	if (c) _conn_payload_secure(conn, c);
+	_conn_payload_secure(conn, c);
 	_conn_udp_send(conn, cli_addr);
 	ulogf_dbg("Sent client disconnect: %s:%d", inet_ntoa(cli_addr->tcp_udp.sin_addr), ntohs(cli_addr->tcp_udp.sin_port));
 }
@@ -301,9 +334,9 @@ _server_client_disconnect(netconn_t *restrict conn, netsrvclient_t *c, uint8_t r
 		c->common.disconnect_reason = reason;
 	if (conn) {
 		conn->data.srv.events.ondisconnect(conn, conn->userdata, c->common.disconnect_reason, c, &c->userdata);
-		c->common.status_local = EPROT_STATUS_DISCONNECT;
+		c->common.status = EPROT_STATUS_DISCONNECT;
 	} else {
-		c->common.status_local = EPROT_STATUS_DISCONNECT_PENDING;
+		c->common.status = EPROT_STATUS_DISCONNECT_PENDING;
 	}
 	c->common.tick_remote_latest = 0;
 }
@@ -355,13 +388,13 @@ _client_disconnect(netconn_t **__conn, uint8_t reason)
 	struct conncommon *s = &conn->data.cli.common;
 
 	/* hold until the server replies. unless it's a timeout */
-	if (s->status_remote == EPROT_STATUS_DISCONNECT || reason == EDISCONNECT_TIMEOUT) {
+	if (s->remote.status == EPROT_STATUS_DISCONNECT || reason == EDISCONNECT_TIMEOUT) {
 		conn->data.cli.events.ondisconnect(__conn, conn->userdata, reason);
 		if (!*__conn) return;
-		s->status_remote = EPROT_STATUS_DISCONNECT;
+		s->remote.status = EPROT_STATUS_DISCONNECT;
 	}
 
-	s->status_local = EPROT_STATUS_DISCONNECT;
+	s->status = EPROT_STATUS_DISCONNECT;
 	s->disconnect_reason = reason;
 	s->tick_remote_latest = 0;
 }
@@ -409,7 +442,7 @@ _server_onconnect_internal(netconn_t *restrict conn, netsrvclient_t *restrict cl
 	int ret = ECONNECTION_AGAIN;
 	int err = handshake_server_onestep(p_in, p_out, &conn->data.srv.keypair,
 									conn->secure_ciphers, &client->common.crypto,
-									conn->tick_local, client->common.tick_remote,
+									conn->tick_local, client->common.remote.tick,
 									!conn->settings.dont_distribute_public_key);
 	switch (err) {
 		case EHANDSHAKE_ERR_INPUT:
@@ -435,8 +468,8 @@ _server_onconnect_internal(netconn_t *restrict conn, netsrvclient_t *restrict cl
 
 		case 1:
 			ret = ECONNECTION_ALLOW;
-			client->common.tick_local 			= client->common.tick_remote + 32768;
-			client->common.tick_remote_latest 	= client->common.tick_remote + 32768;
+			client->common.tick_local 			= client->common.remote.tick + 32768;
+			client->common.tick_remote_latest 	= client->common.remote.tick + 32768;
 			break;
 
 		case 0:
@@ -518,6 +551,7 @@ _client_onconnect_internal(netconn_t **__conn, packet_t *restrict p_in, packet_t
 		
 		conn->tick_time_target_us = 1000000L / server_tick_rate;
 		conn->settings.tick_rate = server_tick_rate;
+		conn->rtt_ema_alpha = ema_alpha(server_tick_rate * 0.1f);
 	}
 	return ret;
 
@@ -560,7 +594,7 @@ _server_netmsg_pack_connect(netconn_t *restrict conn, netsrvclient_t *restrict c
 
 	switch(res) {
 		case ECONNECTION_ALLOW:
-			client->common.status_local = EPROT_STATUS_CONNECTED;
+			client->common.status = EPROT_STATUS_CONNECTED;
 			break;
 		case ECONNECTION_REFUSE:
 			_server_client_disconnect(conn, client, EDISCONNECT_REFUSED);
@@ -635,7 +669,7 @@ _client_netmsg_unpack_all(netconn_t **__conn, packet_t *restrict p_in)
 	netconn_t *conn = *__conn;
 	int once = 0;
 	_conn_netmsg_unpack_all(&conn->data.cli.common.msgctx, p_in, {
-		if (conn->data.cli.common.status_remote == EPROT_STATUS_CONNECT) {
+		if (conn->data.cli.common.remote.status == EPROT_STATUS_CONNECT) {
 			if (once) {
 				ulogf_ntc("Protocol violation: Server sent more then one message at a time during connect stage.");
 				_client_disconnect(__conn, EDISCONNECT_PROTOCOL_VIOLATION);
@@ -660,7 +694,7 @@ _client_netmsg_unpack_all(netconn_t **__conn, packet_t *restrict p_in)
 
 
 static inline int
-_conn_recv(netconn_t *restrict conn, usocket_addr_t *restrict addr, uint16_t *restrict remote_tick, uint8_t *restrict remote_status, uint8_t *restrict secure)
+_conn_recv(netconn_t *restrict conn, usocket_addr_t *restrict addr, conn_header_t *restrict remote)
 {
 	ssize_t recvlen;
 	int err;
@@ -678,18 +712,22 @@ _conn_recv(netconn_t *restrict conn, usocket_addr_t *restrict addr, uint16_t *re
 	packet_set_length(conn->payload_packet, 0);
 
 	/* Read header */
-	err = packet_r_16_t(conn->in_packet, remote_tick);
+	err = packet_r_16_t(conn->in_packet, &remote->tick);
 	if (err) return 0;
-	err = packet_r_bits(conn->in_packet, remote_status, EPROT_STATUS_SIZE);
+	err = packet_r_bits(conn->in_packet, &remote->status, EPROT_STATUS_SIZE);
 	if (err) return 0;
-	err = packet_r_bits(conn->in_packet, secure, 2);
+	err = packet_r_bits(conn->in_packet, &remote->round_trip_flag_echo, 1);
+	if (err) return 0;
+	err = packet_r_bits(conn->in_packet, &remote->round_trip_flag, 1);
+	if (err) return 0;
+	err = packet_r_bits(conn->in_packet, &remote->secure, 2);
 	if (err) return 0;
 
 	return 1;
 }
 
 static inline void
-_conncommon_tick(struct conncommon *restrict c)
+_conncommon_tick(struct conncommon *restrict c, float rtt_ema_alpha)
 {
 	c->tick_local++;
 
@@ -697,6 +735,18 @@ _conncommon_tick(struct conncommon *restrict c)
 		/* Add tx nonce */
 		crypto_nonce_add(&c->crypto.tx, 1);
 		c->crypto.auth_tx.nonce += 1;
+	}
+
+	/* handle rtt */
+	if (c->round_trip_counter < UINT8_MAX)
+		c->round_trip_counter++;
+
+	/* rtt bit got echoed back */
+	if (c->remote.round_trip_flag == c->round_trip_flag_expected) {
+		c->round_trip_flag_expected = ~c->remote.round_trip_flag & 1;
+		c->round_trip_ticks = c->round_trip_counter;
+		c->round_trip_counter = 0;
+		c->round_trip_ticks_ema = ema(rtt_ema_alpha, c->round_trip_ticks_ema, c->round_trip_ticks);
 	}
 }
 
@@ -706,11 +756,9 @@ _server_recv(netconn_t *restrict conn)
 {
 	usocket_addr_t 	cli_addr = {0};
 
-	uint16_t 	remote_tick;
-	uint8_t 	remote_status;
-	uint8_t 	secure;
+	conn_header_t remote = {0};
 
-	if (!_conn_recv(conn, &cli_addr, &remote_tick, &remote_status, &secure))
+	if (!_conn_recv(conn, &cli_addr, &remote))
 		return NULL;
 
 
@@ -720,10 +768,12 @@ _server_recv(netconn_t *restrict conn)
 	HASH_FIND(hh, conn->data.srv.connected_clients, &cli_id, sizeof(cli_id), client);
 
 	if (!client) {
-		if (remote_status != EPROT_STATUS_CONNECT || secure != ESECURE_NONE) {
+		struct conncommon c = {0};
+		c.remote = remote;
+		if (remote.status != EPROT_STATUS_CONNECT || remote.secure != ESECURE_NONE) {
 			ulogf_dbg("Client already disconnected");
 			/* Already disconnected. Reinforce disconnection. */
-			_send_disconnect(conn, &cli_addr, EDISCONNECT_NONE, NULL);
+			_send_disconnect(conn, &cli_addr, EDISCONNECT_NONE, &c);
 			return NULL;
 		}
 
@@ -733,19 +783,17 @@ _server_recv(netconn_t *restrict conn)
 		/* initialize client */
 		client = _server_client_init(conn, &cli_addr, cli_id);
 		if (!client) {
-			_send_disconnect(conn, &cli_addr, EDISCONNECT_INTERNAL_ERROR, NULL);
+			_send_disconnect(conn, &cli_addr, EDISCONNECT_INTERNAL_ERROR, &c);
 			ulogf_wrn("Failed to initialize client");
 			return NULL;
 		}
-		client->common.tick_remote_latest	= remote_tick;
-		client->common.tick_local			= remote_tick;
+		client->common.tick_remote_latest	= remote.tick;
+		client->common.tick_local			= remote.tick;
 		/* the client is the one that needs to catch up with the server */
 		client->common.handshake_status 	= EHANDSHAKE_STATUS_TICK_SYNC;
 	}
 
-	client->common.tick_remote = remote_tick;
-	client->common.status_remote = remote_status;
-	client->common.secure = secure;
+	client->common.remote = remote;
 	return client;
 }
 
@@ -762,9 +810,9 @@ _server_process_recv(netconn_t *restrict conn)
 		if (!applicable) continue;
 
 		/* handle disconnection */
-		if (c->common.status_remote == EPROT_STATUS_DISCONNECT) {
+		if (c->common.remote.status == EPROT_STATUS_DISCONNECT) {
 			/* handle disconnection initiated by the client */
-			if (c->common.status_local != EPROT_STATUS_DISCONNECT) {
+			if (c->common.status != EPROT_STATUS_DISCONNECT) {
 				ulogf_dbg("Client initiated disconnection");
 				uint8_t reason;
 				/* Fallback to generic disconnect if reading the reason fails. */
@@ -777,10 +825,10 @@ _server_process_recv(netconn_t *restrict conn)
 			continue;
 		}
 
-		if (c->common.status_local == EPROT_STATUS_DISCONNECT)
+		if (c->common.status == EPROT_STATUS_DISCONNECT)
 			continue;
 
-		if (c->common.status_local == EPROT_STATUS_DISCONNECT_PENDING) {
+		if (c->common.status == EPROT_STATUS_DISCONNECT_PENDING) {
 			_server_client_disconnect(conn, c, c->common.disconnect_reason);
 			continue;
 		}
@@ -790,8 +838,8 @@ _server_process_recv(netconn_t *restrict conn)
 
 
 		/* handle connect */
-		if (c->common.status_remote == EPROT_STATUS_CONNECT) {
-			if (c->common.status_local == EPROT_STATUS_CONNECT) {
+		if (c->common.remote.status == EPROT_STATUS_CONNECT) {
+			if (c->common.status == EPROT_STATUS_CONNECT) {
 				_server_netmsg_unpack_onconnect(conn, c, conn->payload_packet);
 				continue;
 			}
@@ -824,14 +872,14 @@ _server_process_send(netconn_t *restrict conn)
 	for (client = conn->data.srv.connected_clients; client; ) {
 		
 		/* client tick */
-		_conncommon_tick(&client->common);
+		_conncommon_tick(&client->common, conn->rtt_ema_alpha);
 
 		/* handle server kick */
-		if (client->common.status_local == EPROT_STATUS_DISCONNECT_PENDING)
+		if (client->common.status == EPROT_STATUS_DISCONNECT_PENDING)
 			_server_client_disconnect(conn, client, client->common.disconnect_reason);
 
 		/* handle disconnected */
-		if (client->common.status_local == EPROT_STATUS_DISCONNECT) {
+		if (client->common.status == EPROT_STATUS_DISCONNECT) {
 			if (client->common.tick_remote_latest++ == conn->settings.kick_notice_tick) {
 				/* Disconnect notice already sent multiple times. Remove client */
 				if (!client->hh.next) {
@@ -850,7 +898,7 @@ _server_process_send(netconn_t *restrict conn)
 		{
 			client->common.tick_local_noresp_count++;
 
-			const uint16_t timeout_ticks = client->common.status_local == EPROT_STATUS_CONNECT? conn->settings.pending_conn_timeout_tick : conn->settings.timeout_tick;
+			const uint16_t timeout_ticks = client->common.status == EPROT_STATUS_CONNECT? conn->settings.pending_conn_timeout_tick : conn->settings.timeout_tick;
 			if (client->common.tick_local_noresp_count == timeout_ticks) {
 				_send_disconnect(conn, &client->sockaddr, client->common.disconnect_reason, &client->common);
 				_server_client_disconnect(conn, client, EDISCONNECT_TIMEOUT);
@@ -858,14 +906,11 @@ _server_process_send(netconn_t *restrict conn)
 			}
 		}
 
-		if (client->common.status_local != EPROT_STATUS_CONNECTED && client->common.status_local != EPROT_STATUS_CONNECT)
+		if (client->common.status != EPROT_STATUS_CONNECTED && client->common.status != EPROT_STATUS_CONNECT)
 			goto next_client;
 
 		/* prepare packet */
-		packet_rewind(conn->out_packet);
-		packet_w_16_t(conn->out_packet, &conn->tick_local);
-		packet_w_bits(conn->out_packet, client->common.status_local, EPROT_STATUS_SIZE);
-		packet_rewind(conn->payload_packet);
+		_conn_prepare_outpkt(conn, &client->common);
 
 		/* write messages */
 		int32_t err = netmsg_pack(&client->common.msgctx, conn->payload_packet);
@@ -876,7 +921,7 @@ _server_process_send(netconn_t *restrict conn)
 			continue;
 		}
 
-		if (client->common.status_local == EPROT_STATUS_CONNECTED) {
+		if (client->common.status == EPROT_STATUS_CONNECTED) {
 			/* call onsend. only for connected clients. */
 			conn->data.srv.events.onsendpkt(conn, conn->userdata, conn->payload_packet, client, client->userdata);
 
@@ -905,18 +950,18 @@ _client_process_recv(netconn_t **__conn)
 	netconn_t *conn = *__conn;
 	struct conncommon *s = &conn->data.cli.common;
 
-	if (s->status_local == EPROT_STATUS_DISCONNECT &&
-		s->status_remote == EPROT_STATUS_DISCONNECT)
+	if (s->status == EPROT_STATUS_DISCONNECT &&
+		s->remote.status == EPROT_STATUS_DISCONNECT)
 		return;
 
 	while (1) {
-		if (!_conn_recv(conn, &conn->udp_sock.addr, &s->tick_remote, &s->status_remote, &s->secure))
+		if (!_conn_recv(conn, &conn->udp_sock.addr, &s->remote))
 			return;
 
 		/* sync first tick */
 		if (s->handshake_status == EHANDSHAKE_STATUS_NONE) {
-			s->tick_local 			= s->tick_remote;
-			s->tick_remote_latest 	= s->tick_remote;
+			s->tick_local 			= s->remote.tick;
+			s->tick_remote_latest 	= s->remote.tick;
 			s->handshake_status 	= EHANDSHAKE_STATUS_TICK_SYNC;
 		}
 		
@@ -924,10 +969,10 @@ _client_process_recv(netconn_t **__conn)
 		if (!applicable) continue;
 
 		/* handle disconnection */
-		if (s->status_local == EPROT_STATUS_DISCONNECT)
+		if (s->status == EPROT_STATUS_DISCONNECT)
 			return;
 
-		if (s->status_remote == EPROT_STATUS_DISCONNECT) {
+		if (s->remote.status == EPROT_STATUS_DISCONNECT) {
 			uint8_t reason;
 			if (packet_r_8_t(conn->payload_packet, &reason))
 				reason = EDISCONNECT;
@@ -943,8 +988,8 @@ _client_process_recv(netconn_t **__conn)
 			return;
 		}
 
-		s->status_local = s->status_remote;
-		if (s->status_remote == EPROT_STATUS_CONNECT)
+		s->status = s->remote.status;
+		if (s->remote.status == EPROT_STATUS_CONNECT)
 			continue;
 		
 		conn->data.cli.events.onreceivepkt(conn, conn->userdata, conn->payload_packet);
@@ -961,18 +1006,18 @@ _client_process_send(netconn_t **__conn)
 	struct conncommon *s = &conn->data.cli.common;
 
 	/* server tick */
-	_conncommon_tick(s);
+	_conncommon_tick(s, conn->rtt_ema_alpha);
 
 	/* Handle disconnect */
-	if (s->status_remote == EPROT_STATUS_DISCONNECT) {
+	if (s->remote.status == EPROT_STATUS_DISCONNECT) {
 		_client_disconnect(__conn, s->disconnect_reason);
 		return;
 	}
 
-	if (s->status_local == EPROT_STATUS_DISCONNECT) {
+	if (s->status == EPROT_STATUS_DISCONNECT) {
 		if (s->tick_remote_latest++ == conn->settings.kick_notice_tick) {
 			/* Disconnect notice already sent multiple times */
-			s->status_remote = EPROT_STATUS_DISCONNECT;
+			s->remote.status = EPROT_STATUS_DISCONNECT;
 			_client_disconnect(__conn, s->disconnect_reason);
 			return;
 		}
@@ -984,7 +1029,7 @@ _client_process_send(netconn_t **__conn)
 	{
 		s->tick_local_noresp_count++;
 
-		const uint16_t timeout_ticks = s->status_local == EPROT_STATUS_CONNECT? conn->settings.pending_conn_timeout_tick : conn->settings.timeout_tick;
+		const uint16_t timeout_ticks = s->status == EPROT_STATUS_CONNECT? conn->settings.pending_conn_timeout_tick : conn->settings.timeout_tick;
 		if (s->tick_local_noresp_count == timeout_ticks) {
 			_client_disconnect(__conn, EDISCONNECT_TIMEOUT);
 			return;
@@ -993,10 +1038,7 @@ _client_process_send(netconn_t **__conn)
 
 	
 	/* prepare packet */
-	packet_rewind(conn->out_packet);
-	packet_w_16_t(conn->out_packet, &conn->tick_local);
-	packet_w_bits(conn->out_packet, s->status_local, EPROT_STATUS_SIZE);
-	packet_rewind(conn->payload_packet);
+	_conn_prepare_outpkt(conn, s);
 
 	/* write messages */
 	int32_t err = netmsg_pack(&conn->data.cli.common.msgctx, conn->payload_packet);
@@ -1007,7 +1049,7 @@ _client_process_send(netconn_t **__conn)
 		return;
 	}
 
-	if (s->status_local != EPROT_STATUS_CONNECT) {
+	if (s->status != EPROT_STATUS_CONNECT) {
 		/* call onsend */
 		conn->data.cli.events.onsendpkt(conn, conn->userdata, conn->payload_packet);
 
@@ -1041,6 +1083,7 @@ _conn_init(const struct netsettings settings, void *userdata)
 	conn->settings = settings;
 	conn->userdata = userdata;
 	if (settings.tick_rate) {
+		conn->rtt_ema_alpha = ema_alpha(settings.tick_rate * 0.1f);
 		conn->tick_time_target_us = 1000000L / settings.tick_rate;
 
 		/* measure approx. sleep overhead */
@@ -1135,7 +1178,7 @@ server_cleanup(netconn_t *c)
 		/* if for some reason the server is not empty */
 		for (client = c->data.srv.connected_clients; client != NULL; ) {
 			/* anounce disconnect if not disconnected yet */
-			if (client->common.status_local != EPROT_STATUS_DISCONNECT)
+			if (client->common.status != EPROT_STATUS_DISCONNECT)
 				_send_disconnect(c, &client->sockaddr, EDISCONNECT_SERVER_CLOSING, &client->common);
 
 			/* free client */
@@ -1234,7 +1277,7 @@ server_cli_get_next(netsrvclient_t *client)
 	netsrvclient_t *next = client->hh.next;
 
 	while (next) {
-		if (next->common.status_local == EPROT_STATUS_CONNECTED)
+		if (next->common.status == EPROT_STATUS_CONNECTED)
 			return next;
 		next = next->hh.next;
 	}
@@ -1265,15 +1308,29 @@ int32_t
 server_cli_sendmessage(netsrvclient_t *restrict client, const void *restrict buffer, const uint32_t size)
 {
 	if (!client) return -1;
-	if (client->common.status_local != EPROT_STATUS_CONNECTED) return -1;
+	if (client->common.status != EPROT_STATUS_CONNECTED) return -1;
 	return netmsg_enqueue(&client->common.msgctx, buffer, size);
 }
 
 uint16_t
-server_cli_get_external_tick(netsrvclient_t *restrict client)
+server_cli_get_tick_remote(netsrvclient_t *restrict client)
 {
 	if (!client) return 0;
 	return client->common.tick_remote_latest;
+}
+
+float
+server_cli_get_ping_ms(netsrvclient_t *restrict client, float tickrate)
+{
+	if (!client) return NAN;
+	return client->common.round_trip_ticks_ema / (tickrate * 0.001f);
+}
+
+float
+server_cli_get_ping_ticks(netsrvclient_t *restrict client)
+{
+	if (!client) return NAN;
+	return client->common.round_trip_ticks_ema;
 }
 
 /********************************
@@ -1316,7 +1373,7 @@ void
 client_disconnect(netconn_t *restrict conn)
 {
 	if (!conn) return;
-	conn->data.cli.common.status_local = EPROT_STATUS_DISCONNECT;
+	conn->data.cli.common.status = EPROT_STATUS_DISCONNECT;
 	conn->data.cli.common.disconnect_reason = EDISCONNECT;
 }
 
@@ -1324,15 +1381,29 @@ int32_t
 client_sendmessage(netconn_t *restrict conn, const void *restrict buffer, const uint32_t size)
 {
 	if (!conn) return -1;
-	if (conn->data.cli.common.status_local != EPROT_STATUS_CONNECTED) return -1;
+	if (conn->data.cli.common.status != EPROT_STATUS_CONNECTED) return -1;
 	return netmsg_enqueue(&conn->data.cli.common.msgctx, buffer, size);
 }
 
 uint16_t
-client_get_remote_tick(netconn_t *restrict conn)
+client_get_tick_remote(netconn_t *restrict conn)
 {
 	if (!conn) return 0;
 	return conn->data.cli.common.tick_remote_latest;
+}
+
+float
+client_get_ping_ms(netconn_t *restrict conn)
+{
+	if (!conn) return NAN;
+	return conn->data.cli.common.round_trip_ticks_ema / (conn->settings.tick_rate * 0.001f);
+}
+
+float
+client_get_ping_ticks(netconn_t *restrict conn)
+{
+	if (!conn) return NAN;
+	return conn->data.cli.common.round_trip_ticks_ema;
 }
 
 /********************************
@@ -1431,6 +1502,13 @@ conn_get_tick_local(netconn_t *restrict conn)
 {
 	if (!conn) return 0;
 	return conn->tick_local;
+}
+
+uint16_t
+conn_get_tick_rate(netconn_t *restrict conn)
+{
+	if (!conn) return 0;
+	return conn->settings.tick_rate;
 }
 
 const struct netstats *

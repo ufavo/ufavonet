@@ -205,7 +205,9 @@ int32_t client_sendmessage(netconn_t *restrict conn, const void *restrict buffer
  * After called, eventually `ondisconnect` event will be triggered. */
 void client_disconnect(netconn_t *restrict conn);
 
-uint16_t client_get_remote_tick(netconn_t *restrict conn);
+uint16_t client_get_tick_remote(netconn_t *restrict conn);
+float client_get_ping_ms(netconn_t *restrict conn);
+float client_get_ping_ticks(netconn_t *restrict conn);
 
 /* return the next client, or NULL. 
  * can be used in the event `bonsendpkt` with the `first` client. */
@@ -219,8 +221,12 @@ char 			*server_cli_get_addrstr(netsrvclient_t *restrict client);
  * Returns the id of the batch whose the message is part of. The id can be used to identify the batch of the message during `onmessageack` event. */
 int32_t 		server_cli_sendmessage(netsrvclient_t *restrict client, const void *restrict buffer, const uint32_t size);
 
-uint16_t 	server_cli_get_remote_tick(netsrvclient_t *restrict client);
-uint16_t 	conn_get_local_tick(netconn_t *restrict conn);
+uint16_t 	server_cli_get_tick_remote(netsrvclient_t *restrict client);
+float		server_cli_get_ping_ms(netsrvclient_t *restrict client, float tickrate);
+float		server_cli_get_ping_ticks(netsrvclient_t *restrict client);
+
+uint16_t 	conn_get_tick_local(netconn_t *restrict conn);
+uint16_t	conn_get_tick_rate(netconn_t *restrict conn);
 /* return a pointer to the internal netstats struct */
 const struct netstats *conn_get_stats(netconn_t *restrict conn);
 
