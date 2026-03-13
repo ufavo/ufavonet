@@ -195,8 +195,10 @@ handshake_client_step(handshake_t 		*restrict ctx,
 		_packet_init_from_buf(&tmp, buf, sizeof(buf));
 
 		/* write null terminated list of prefered ciphers */
-		err = packet_w(&tmp, prefered_ciphers, ECRYPTO_ALGO_COUNT + 1);
-		if (err) return EHANDSHAKE_ERR_INTERNAL;
+		do {
+			err = packet_w_8_t(&tmp, prefered_ciphers);
+			if (err) return EHANDSHAKE_ERR_INTERNAL;
+		} while (*prefered_ciphers++);
 		
 
 		/* generate credentials and checkbytes */
@@ -251,6 +253,7 @@ handshake_client_step(handshake_t 		*restrict ctx,
 		packet_r_8_t(pkt_in, &out_crypto->rx.type);
 		out_crypto->rx.type--;
 		out_crypto->tx.type = out_crypto->rx.type;
+		ulogf_inf("Chosen cipher: %s", crypto_cipher_name(out_crypto->rx.type));
 	
 		if (out_crypto->rx.type >= (uint8_t)ECRYPTO_ALGO_COUNT) {
 			out_crypto->rx.type = out_crypto->tx.type = 0;

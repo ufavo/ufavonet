@@ -302,13 +302,14 @@ crypto_cipher_benchmark(uint32_t itercnt)
 
 	ulogf_inf("Benchmarking cipher algorithms... (for each cipher, encrypt %zu bytes %"PRIu32" times)", sizeof(msg), itercnt);
 
-	uint8_t i;
+	uint8_t i, j;
 	for (i = 0; i < ECRYPTO_ALGO_COUNT; i++) {
 		ctx.type = i;
+		int_fast64_t result;
 		if (crypto_encrypt(&ctx, msg, sizeof(msg), NULL, 0, out)) {
 			ulogf_wrn("%s failed (not supported by hardware?)", crypto_cipher_name(i));
-			timev[i] = -1;
-			continue;
+			result = INT_FAST64_MAX;
+			goto insert;
 		}
 
 		uint32_t n;
@@ -319,11 +320,11 @@ crypto_cipher_benchmark(uint32_t itercnt)
 			crypto_encrypt(&ctx, msg, sizeof(msg), NULL, 0, out);
 		}
 
-		int_fast64_t result = -utime_remaining(&t, 0);
+		result = -utime_remaining(&t, 0);
 		ulogf_inf("%s took %.03lfms", crypto_cipher_name(i), (double)result / 1000.0);
 
+insert:
 		/* insertion sort */
-		uint8_t j;
 		for (j = i; j > 0 && timev[j-1] > result; j--) {
 			timev[j] = timev[j-1];
 			cipherv[j] = cipherv[j-1];
@@ -331,6 +332,11 @@ crypto_cipher_benchmark(uint32_t itercnt)
 		timev[j] = result;
 		cipherv[j] = i+1;
 	}
-	
+
+	/* remove failures */
+	for (i = 0; i < ECRYPTO_ALGO_COUNT; i++)
+		if (timev[i] == INT_FAST64_MAX)
+			cipherv[i] = 0;
+
 	return cipherv;
 }
