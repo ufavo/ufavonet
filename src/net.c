@@ -913,7 +913,7 @@ _server_process_send(netconn_t *restrict conn)
 		_conn_prepare_outpkt(conn, &client->common);
 
 		/* write messages */
-		int32_t err = netmsg_pack(&client->common.msgctx, conn->payload_packet);
+		int32_t err = netmsg_pack(&client->common.msgctx, conn->payload_packet, (uint8_t)client->common.round_trip_ticks_ema);
 		if (err != ENETMSG_ERR_NONE) {
 			ulogf_crt("Failed to pack messages. Dropping connection. Err: %" PRIi32, err);
 			_server_client_disconnect(conn, client, EDISCONNECT_INTERNAL_ERROR);
@@ -1041,7 +1041,7 @@ _client_process_send(netconn_t **__conn)
 	_conn_prepare_outpkt(conn, s);
 
 	/* write messages */
-	int32_t err = netmsg_pack(&conn->data.cli.common.msgctx, conn->payload_packet);
+	int32_t err = netmsg_pack(&conn->data.cli.common.msgctx, conn->payload_packet, (uint8_t)s->round_trip_ticks_ema);
 	if (err != ENETMSG_ERR_NONE) {
 		ulogf_crt("Failed to pack messages. Dropping connection. Err: %" PRIi32, err);
 		_send_disconnect(conn, &conn->udp_sock.addr, EDISCONNECT_INTERNAL_ERROR, s);

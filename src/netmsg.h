@@ -41,6 +41,7 @@ typedef struct {
 	uint8_t 	next_available_pack_id;
 	uint8_t 	has_new_msg, needs_to_send_ack;
 	uint8_t 	unpack_cnt, pack_cnt;
+	uint8_t 	pack_cooldown_ticks;
 	uint32_t 	pkt_length_at_max_send_pack;
 } netmsg_ctx_t;
 
@@ -48,7 +49,7 @@ typedef struct {
 int32_t	netmsg_init(netmsg_ctx_t *restrict ctx, uint32_t prealloc_packet_bytes);
 void	netmsg_deinit(netmsg_ctx_t *restrict ctx);
 
-int32_t	netmsg_pack(netmsg_ctx_t *restrict ctx, packet_t *restrict p);
+int32_t	netmsg_pack(netmsg_ctx_t *restrict ctx, packet_t *restrict p, uint8_t round_trip_ticks);
 int32_t	netmsg_unpack_next(netmsg_ctx_t *restrict ctx, packet_t *restrict p, void **out, uint32_t *out_size);
 
 int32_t	netmsg_enqueue(netmsg_ctx_t *restrict ctx, const void *data, const uint32_t size);

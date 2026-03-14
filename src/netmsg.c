@@ -58,12 +58,21 @@ netmsg_deinit(netmsg_ctx_t *restrict ctx)
 
 
 inline int32_t
-netmsg_pack(netmsg_ctx_t *restrict ctx, packet_t *restrict p)
+netmsg_pack(netmsg_ctx_t *restrict ctx, packet_t *restrict p, uint8_t round_trip_ticks)
 {
 	int err;
 	
 	const uint8_t has_ack = ctx->acknowledged_count > 0 && ctx->needs_to_send_ack;
 	const uint8_t has_msg = packet_get_length(ctx->pkt) > 0;
+
+	// Wait for the round-trip time to avoid unneeded retransmission.
+	if (ctx->pack_cooldown_ticks++ >= round_trip_ticks) {
+		ctx->pack_cooldown_ticks = 0;
+	} else {
+		ulogf_dbg("Didn't pack due to cooldown");
+		ctx->pack_cooldown_ticks++;
+		return ENETMSG_ERR_NONE;
+	}
 
 	ulogf_dbg("Has ack: %c. Has msg: %c.", has_ack? 'y' : 'n', has_msg? 'y' : 'n');
 	// Write acknowledgements
@@ -257,6 +266,8 @@ netmsg_unpack_next(netmsg_ctx_t *restrict ctx, packet_t *restrict p, void **out,
 
 		ulogf_dbg("Unpacking msg with %d groups", ctx->unpack_cnt);
 
+		// force pack on the next pack call
+		ctx->pack_cooldown_ticks = UINT8_MAX;
 		ctx->needs_to_send_ack = 1;
 
 		// Read first gid
@@ -362,6 +373,9 @@ netmsg_enqueue(netmsg_ctx_t *restrict ctx, const void *data, const uint32_t size
 	if (err) return -err;
 	err += packet_w(ctx->pkt, data, size);
 	if (err) return -err;
+
+	// force pack on the next pack call
+	ctx->pack_cooldown_ticks = UINT8_MAX;
 
 	return ctx->next_available_pack_id;
 }
