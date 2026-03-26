@@ -71,6 +71,8 @@ netmsg_pack(netmsg_ctx_t *restrict ctx, packet_t *restrict p, uint8_t round_trip
 	} else {
 		ulogf_dbg("Didn't pack due to cooldown");
 		ctx->pack_cooldown_ticks++;
+		err = packet_w_bits(p, 0, 2);
+		if (err) return -err;
 		return ENETMSG_ERR_NONE;
 	}
 
