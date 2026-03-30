@@ -93,7 +93,7 @@ usock_udp_bind(usocket_t *restrict sock)
 		ulog_errno("Unable to bind socket to address");
 		return 0;
 	}
-	ulogf_ntc("UDP Socket listening at %s:%d", inet_ntoa(sock->addr.tcp_udp.sin_addr), ntohs(sock->addr.tcp_udp.sin_port));
+	ulogf_ntc("UDP Socket listening at %s:%"PRIu16, inet_ntoa(sock->addr.tcp_udp.sin_addr), ntohs(sock->addr.tcp_udp.sin_port));
 	return 1;
 }
 
@@ -118,7 +118,7 @@ usock_udp_send(usocket_t *restrict sock, usocket_addr_t *restrict addr, const vo
 		return 0;
 	}
 
-	ulogf_dbg("Sent %lu bytes to: %s:%d", size, inet_ntoa(addr->tcp_udp.sin_addr), ntohs(addr->tcp_udp.sin_port));
+	ulogf_dbg("Sent %lu bytes to: %s:%"PRIu16, size, inet_ntoa(addr->tcp_udp.sin_addr), ntohs(addr->tcp_udp.sin_port));
 	return 1;
 }
 
@@ -135,7 +135,7 @@ usock_udp_recv(usocket_t *restrict sock, usocket_addr_t *restrict addr, void *re
 		ulog_errno("recvfrom");
 		return -1;
 	}
-	ulogf_dbg("Received %ld bytes from: %s:%d", recvlen, inet_ntoa(addr->tcp_udp.sin_addr), ntohs(addr->tcp_udp.sin_port));
+	ulogf_dbg("Received %ld bytes from: %s:%"PRIu16, recvlen, inet_ntoa(addr->tcp_udp.sin_addr), ntohs(addr->tcp_udp.sin_port));
 	return recvlen;
 }
 /*

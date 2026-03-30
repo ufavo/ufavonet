@@ -325,6 +325,7 @@ _send_disconnect(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr, ui
 	_conn_payload_secure(conn, c);
 	_conn_udp_send(conn, cli_addr);
 	ulogf_dbg("Sent client disconnect: %s:%d", inet_ntoa(cli_addr->tcp_udp.sin_addr), ntohs(cli_addr->tcp_udp.sin_port));
+	ulogf_dbg("Sent client disconnect: %s:%"PRIu16, inet_ntoa(cli_addr->tcp_udp.sin_addr), ntohs(cli_addr->tcp_udp.sin_port));
 }
 
 static inline void
@@ -344,7 +345,7 @@ _server_client_disconnect(netconn_t *restrict conn, netsrvclient_t *c, uint8_t r
 static inline void
 _server_client_free(netconn_t *restrict conn, netsrvclient_t *c)
 {
-	ulogf_dbg("Removed client: %s:%d", server_cli_get_addrstr(c), server_cli_get_port(c));
+	ulogf_dbg("Removed client: %s:%"PRIu16, server_cli_get_addrstr(c), server_cli_get_port(c));
 	HASH_DEL(conn->data.srv.connected_clients, c);
 	netmsg_deinit(&c->common.msgctx);
 	ufree(c);
@@ -377,7 +378,7 @@ _server_client_init(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr,
 		ufavonet_global.uthash_oom = 0;
 		return NULL;
 	}
-	ulogf_dbg("Initialized client: %s:%d", server_cli_get_addrstr(client), server_cli_get_port(client));
+	ulogf_dbg("Initialized client: %s:%"PRIu16, server_cli_get_addrstr(client), server_cli_get_port(client));
 	return client;
 }
 
