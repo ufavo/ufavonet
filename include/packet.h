@@ -148,5 +148,6 @@ int packet_skip(packet_t *restrict p, const size_t size);
 int packet_skip_bits(packet_t *restrict p, const int n);
 /* Returns `enum packeterr` error code. */
 int packet_skip_vlen29(packet_t *restrict p);
-
+/* Returns the number of bytes needed to store `value` or zero when `value` is out of range */
+int packet_measure_vlen29(uint32_t value);
 #endif

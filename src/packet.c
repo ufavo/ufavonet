@@ -353,6 +353,16 @@ packet_r_bits(packet_t *restrict p, uint8_t *restrict ptr, const int n)
 }
 
 inline int
+packet_measure_vlen29(uint32_t value)
+{
+	if (value < 128) return 1;
+	if (value < 0x4000) return 2;
+	if (value < 0x200000) return 3;
+	if (value < 0x20000000) return 4;
+	return 0;
+}
+
+inline int
 packet_w_vlen29(packet_t *restrict p, const uint32_t value)
 {
 	uint8_t buffer[] = {0,0,0,0};
