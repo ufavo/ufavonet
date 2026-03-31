@@ -1,6 +1,6 @@
 NAME 		= ufavonet
-VERSION 	= 1.0.0
-SOVERSION 	= 1
+VERSION 	= 2.0.0
+SOVERSION 	= 2
 # config
 DESTDIR 	?=
 PREFIX		?= /usr/local
