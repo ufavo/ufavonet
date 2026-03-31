@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 #include "net_utils.h"
 #include "_hooks.h"
@@ -63,6 +64,16 @@ _hostname_any(const char *restrict hostname)
 }
 
 static inline int
+usock_udp_setopt_mtu(usocket_t *restrict sock, int frag)
+{
+	if (setsockopt(sock->fd, IPPROTO_IP, IP_MTU_DISCOVER, &frag, sizeof(frag)) == SOCKET_ERROR) {
+		ulog_errno("Unable to change fragmentation behaviour. setsockopt failed");
+		return 0;
+	}
+	return 1;
+}
+
+static inline int
 usock_udp_init(const char *restrict hostname, uint16_t port, usocket_t *restrict out)
 {
 	memset(out, 0, sizeof(*out));
@@ -78,6 +89,9 @@ usock_udp_init(const char *restrict hostname, uint16_t port, usocket_t *restrict
 	}
 
 	if (!unet_socket_flag_nonblocking(out->fd))
+		return 0;
+
+	if (!usock_udp_setopt_mtu(out, IP_PMTUDISC_PROBE))
 		return 0;
 
 	out->addr.tcp_udp.sin_port = htons(port);
@@ -138,6 +152,32 @@ usock_udp_recv(usocket_t *restrict sock, usocket_addr_t *restrict addr, void *re
 	ulogf_dbg("Received %ld bytes from: %s:%"PRIu16, recvlen, inet_ntoa(addr->tcp_udp.sin_addr), ntohs(addr->tcp_udp.sin_port));
 	return recvlen;
 }
+
+static inline int
+usock_udp_get_local_mtu(usocket_addr_t *restrict addr)
+{
+	int fd;
+	if ( (fd = unet_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_INVALID ) {
+		ulog_errno("Failed to init temp socket");
+		return 0;
+	}
+
+	if (connect(fd, (struct sockaddr *)&addr->tcp_udp, sizeof(addr->tcp_udp)) == SOCKET_ERROR) {
+		unet_close(fd);
+		ulog_errnof("Failed to connect temp socket to destination: %s:%"PRIu16, inet_ntoa(addr->tcp_udp.sin_addr), ntohs(addr->tcp_udp.sin_port));
+		return 0;
+	}
+
+	int pmtu = 0;
+	socklen_t len = sizeof(pmtu);
+	if (getsockopt(fd, IPPROTO_IP, IP_MTU, (void *)&pmtu, &len) == SOCKET_ERROR) {
+		ulog_errnof("getsocketopt failed for destination %s:%"PRIu16, inet_ntoa(addr->tcp_udp.sin_addr), ntohs(addr->tcp_udp.sin_port));
+	}
+
+	unet_close(fd);
+	return pmtu;
+}
+
 /*
 static inline int
 usock_send(usocket_t *restrict sock, usocket_addr_t *restrict addr, const void *restrict ptr, size_t size)
