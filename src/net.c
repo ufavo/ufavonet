@@ -18,11 +18,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-
 #include "utime.h"
 #include "_packet.h"
 
-#include <assert.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1072,7 +1070,7 @@ _client_process_send(netconn_t **__conn)
 static inline netconn_t *
 _conn_init(const struct netsettings settings, void *userdata)
 {
-	assert(NETCONN_SECURE_KEYPAIR_SIZE == (crypto_box_PUBLICKEYBYTES + crypto_box_SECRETKEYBYTES));
+	assert_dbg(NETCONN_SECURE_KEYPAIR_SIZE == (crypto_box_PUBLICKEYBYTES + crypto_box_SECRETKEYBYTES));
 	if (!crypto_init()) return NULL;
 
 	netconn_t *conn = umalloc(sizeof(*conn));

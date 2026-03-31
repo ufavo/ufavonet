@@ -21,6 +21,7 @@
 #ifndef __ufavonet_hooks_internal_h__
 #define __ufavonet_hooks_internal_h__
 
+#include <assert.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include "../include/hooks.h"
@@ -37,7 +38,8 @@ extern ufavonet_global_t ufavonet_global;
 #define HASH_NONFATAL_OOM 1
 #define uthash_nonfatal_oom(elt) ufavonet_global.uthash_oom = 1
 
-#define ulogf(lvl,...) 	ufavonet_global.hooks.log(NULL, (lvl), "ufavonet", __FILE__, __func__, __LINE__, __VA_ARGS__)
+#define ulogf_ex(module,lvl,...) 	ufavonet_global.hooks.log(NULL, (lvl), module, __FILE__, __func__, __LINE__, __VA_ARGS__)
+#define ulogf(lvl,...) 	ulogf_ex("ufavonet",lvl,__VA_ARGS__)
 
 #define ulogf_dbg(...) ulogf(LOG_DEBUG,		__VA_ARGS__)
 #define ulogf_inf(...) ulogf(LOG_INFO,		__VA_ARGS__)
@@ -48,9 +50,13 @@ extern ufavonet_global_t ufavonet_global;
 #define ulogf_alr(...) ulogf(LOG_ALERT,		__VA_ARGS__)
 #define ulogf_emr(...) ulogf(LOG_EMERG,		__VA_ARGS__)
 
+#define assert_dbg(...) assert(__VA_ARGS__)
+
 #ifdef LOG_STRIP
 	#if LOG_STRIP <= LOG_DEBUG
+		#undef assert_dbg
 		#undef ulogf_dbg
+		#define assert_dbg(...)
 		#define ulogf_dbg(...)
 	#endif
 	#if LOG_STRIP <= LOG_INFO

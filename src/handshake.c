@@ -17,7 +17,6 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include "_hooks.h"
@@ -188,7 +187,7 @@ handshake_client_step(handshake_t 		*restrict ctx,
 		
 		ulogf_ntc("Secure setup");
 
-		assert(HANDSHAKE_RANDOM_SIZE < (sizeof(out_crypto->rx.data)*2) + sizeof(ctx->checkbytes) + (sizeof(out_crypto->auth_rx) * 2)? !"Not enough random bytes" : 1);
+		assert_dbg(HANDSHAKE_RANDOM_SIZE < (sizeof(out_crypto->rx.data)*2) + sizeof(ctx->checkbytes) + (sizeof(out_crypto->auth_rx) * 2)? !"Not enough random bytes" : 1);
 
 		uint8_t buf[HANDSHAKE_RANDOM_SIZE + ECRYPTO_ALGO_COUNT + 1];
 		packet_t tmp;
