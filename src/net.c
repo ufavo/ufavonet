@@ -35,43 +35,11 @@
 #include "handshake.h"
 #include "../modules/uthash/src/uthash.h"
 #include "../include/net.h"
+#include "_net.h"
+#include "netfrag.h"
 
-enum {
-	ETYPE_SERVER = 0,
-	ETYPE_CLIENT
-};
-
-enum {
-	EPROT_STATUS_SIZE = 2,
-	
-	EPROT_STATUS_CONNECT = 0,
-	EPROT_STATUS_CONNECTED,
-	EPROT_STATUS_DISCONNECT,
-
-	/* not sent through network */
-	EPROT_STATUS_DISCONNECT_PENDING
-};
-
-enum {
-	EHANDSHAKE_STATUS_NONE = 0,
-	EHANDSHAKE_STATUS_TICK_SYNC,
-	EHANDSHAKE_STATUS_SERVER_OK,
-	EHANDSHAKE_STATUS_CLIENT_OK,
-};
-
-#define SERVER_BUFFER_LEN UINT16_MAX
-
-#define SOCKADDR_TO_KEY(sockaddr) \
-    ((((uint64_t)(sockaddr.sin_addr.s_addr)) << 16) | \
-     ((uint64_t)(sockaddr.sin_port)))
-
-typedef struct {
-	uint16_t 	tick;
-	uint8_t 	status;
-	uint8_t 	secure;
-	uint8_t 	round_trip_flag;
-	uint8_t 	round_trip_flag_echo;
-} conn_header_t;
+static const uint16_t _mtuv[] = {576-28,600-28,800-28,900-28,1000-28,1100-28,1280-28,1400-28,1420-28,1492-28,1500-28,1530-28,1600-28,2000-28,4096-28,7935-28,8000-28,9000-28,9216-28,12288-28,16384-28,65535-28};//
+#define MTUV_LENGTH ((uint8_t)(sizeof(_mtuv) / sizeof(*_mtuv)))
 
 /* struct that holds common data */
 struct conncommon {
@@ -89,8 +57,17 @@ struct conncommon {
 	uint8_t 	round_trip_ticks;
 	float 		round_trip_ticks_ema;
 
+	uint16_t 	mtu;
+	uint16_t 	mtu_local_max;
+	uint8_t 	mtu_idx;
+	uint8_t 	mtu_interleave_flag;
+	uint8_t 	mtu_status;
+	uint16_t 	mtu_reply_retention;
+	uint16_t 	mtu_cooldown_ticks;
+
 	netmsg_ctx_t 		msgctx;
 	crypto_ctx_t 		crypto;
+	netfrag_multibuilder_t 	fragbuilder;
 };
 
 /* struct that represents a client in the server */
@@ -164,13 +141,6 @@ ema_alpha(float n)
 	return 2.0f / (n + 1.0f);
 }
 
-static inline int32_t
-tick_diff(uint16_t x, uint16_t y)
-{
-	int32_t z = x - y;
-	return z > 32768? z - 65536 : (z < -32768? z + 65536 : z);
-}
-
 /* a given tick is valid if (tick > last tick) && (tick <= expected + margin && tick >= expected - margin)  */
 static inline int
 tick_remote_applicable(uint16_t received, uint16_t last_applied, uint16_t expected, uint16_t margin)
@@ -187,29 +157,185 @@ tick_remote_applicable(uint16_t received, uint16_t last_applied, uint16_t expect
 	return ((diff < 0 ? -diff : diff) <= (margin) && diff1 >= 0);
 }
 
+static inline uint8_t
+_conn_outpkt_header_mtu_status(struct conncommon *restrict c)
+{
+	uint8_t status = c->status;
+	if (status == EPROT_STATUS_CONNECTED) {
+		status = c->remote.mtu_reply && c->mtu_interleave_flag? EPROT_STATUS_CONNECTED_MTU_DISCOVERY_REPLY_DISCOVERY : 
+				(c->remote.mtu_reply? EPROT_STATUS_CONNECTED_MTU_DISCOVERY_REPLY :
+				(c->mtu_interleave_flag? EPROT_STATUS_CONNECTED_MTU_DISCOVERY : status));
+	}
+	return status;
+}
+
+#define PROTO_HEADER_SIZE(status) ((status) == EPROT_STATUS_CONNECTED_MTU_DISCOVERY_REPLY_DISCOVERY || (status) == EPROT_STATUS_CONNECTED_MTU_DISCOVERY_REPLY? 6 : 4)
+#define PROTO_HEADER_FRAG_SIZE 3
+
 static inline void
+_conn_mtu_send_prepass(netconn_t *restrict conn, struct conncommon *restrict c)
+{
+	/* mtu discovery / reply */
+	/* detect loss and attempt mtu drop */
+	if (c->mtu_status == EMTU_STATUS_OK && (c->remote.frag_shared.noresp > 4 || c->tick_local_noresp_count > 4)) {
+		if (c->mtu_idx > 0) {
+			c->mtu = _mtuv[--c->mtu_idx];
+			ulogf_ntc("Packet loss. Dropping MTU guess from %"PRIu16" to %"PRIu16, _mtuv[c->mtu_idx+1], _mtuv[c->mtu_idx]);
+			c->mtu_status = EMTU_STATUS_DISCOVERY_DOWN;
+			c->mtu_interleave_flag = UINT8_MAX;
+			c->mtu_cooldown_ticks = 0;
+		}
+	}
+	
+	if (c->status != EPROT_STATUS_CONNECTED)
+		return;
+
+	if (c->mtu_status == EMTU_STATUS_OK && c->mtu_cooldown_ticks >= conn->settings.tick_rate)
+		return;
+
+	if (c->remote.mtu != c->mtu && c->remote.mtu) {
+		/* other party is receiving. found mtu? try going up on next ticks */
+		c->mtu = c->remote.mtu;
+		c->remote.mtu = 0;
+		ulogf_dbg("Received MTU: %"PRIu16, c->mtu);
+		if (c->mtu_status == EMTU_STATUS_DISCOVERY_DOWN) {
+			c->mtu_status = EMTU_STATUS_DISCOVERY_UP;
+			c->mtu_cooldown_ticks = 0;
+		} else if (_mtuv[MTUV_LENGTH-1] == c->mtu) {
+			/* reached maximum mtu */
+			c->mtu_cooldown_ticks = conn->settings.tick_rate - 1;
+			ulogf_dbg("Advertised maximum MTU: %"PRIu16", currently at %"PRIu16, _mtuv[c->mtu_idx], c->mtu);
+			c->mtu_status = EMTU_STATUS_OK;
+		} else if (c->mtu >= _mtuv[c->mtu_idx]) {
+			/* avoid further advertising of this mtu */
+			c->mtu_cooldown_ticks = 0;
+			while (c->mtu_idx < MTUV_LENGTH-1 && c->mtu >= _mtuv[c->mtu_idx])
+				c->mtu_idx++;
+			ulogf_inf("MTU Discovery: %"PRIu16, _mtuv[c->mtu_idx]);
+		}
+	}
+	
+	if (c->mtu_status == EMTU_STATUS_OK && c->mtu_cooldown_ticks < conn->settings.tick_rate) {
+		c->mtu_cooldown_ticks++;
+		if (c->mtu_cooldown_ticks == conn->settings.tick_rate) {
+			while (_mtuv[c->mtu_idx] > c->mtu && c->mtu_idx) c->mtu_idx--;
+			ulogf_inf("MTU Discovery complete. MTU: %"PRIu16, c->mtu);
+		}
+		return;
+	}
+
+	if (c->mtu_status == EMTU_STATUS_DISCOVERY_UP) {
+		/* send 0.25s worth of samples, interleaved to avoid 100% loss when reaching the path mtu (each step up takes twice the amount of samples) */
+		if (c->mtu_cooldown_ticks >= conn->settings.tick_rate / 4) {
+			c->mtu_cooldown_ticks = 0;
+			if (c->mtu_idx < MTUV_LENGTH-1 && _mtuv[c->mtu_idx] < c->mtu_local_max) {
+				c->mtu_idx++;
+			} else {
+				/* reached maximum mtu */
+				ulogf_inf("Advertised MTU: %"PRIu16", currently at %"PRIu16, _mtuv[c->mtu_idx], c->mtu);
+				c->mtu_status = EMTU_STATUS_OK;
+				return;
+			}
+			ulogf_inf("MTU Discovery: %"PRIu16, _mtuv[c->mtu_idx]);
+		}
+	}
+}
+
+static inline int
+_conn_mtu_send_pass(netconn_t *restrict conn, struct conncommon *restrict c, int64_t header_overhead, size_t *restrict out_mtu)
+{
+	*out_mtu = c->mtu;
+	
+	if (c->mtu_status != EMTU_STATUS_DISCOVERY_UP || c->status != EPROT_STATUS_CONNECTED)
+		return EFRAG_FLAG_NONE;
+
+	if (!c->mtu_interleave_flag) {
+		c->mtu_interleave_flag = ~c->mtu_interleave_flag;
+		return EFRAG_FLAG_NONE;
+	}
+
+	*out_mtu = _mtuv[c->mtu_idx];
+
+	c->mtu_cooldown_ticks++;
+	c->mtu_interleave_flag = ~c->mtu_interleave_flag;
+	
+	/* pad with zeroes if there is not enough data */
+	int mtu_padding = (int64_t)_mtuv[c->mtu_idx] - (int64_t)(conn->payload_packet->length + header_overhead);
+	if (mtu_padding > 0) {
+		conn->payload_packet->index = conn->payload_packet->length;
+		void *out;
+		packet_w_deferred(conn->payload_packet, mtu_padding, &out);
+		memset(out, 0, mtu_padding);
+		memset(out, 1, 1);
+		packet_rewind(conn->payload_packet);
+		ulogf_dbg("MTU Discovery added padding: %d bytes", mtu_padding);
+		return EFRAG_FLAG_NONE;
+	}
+
+	/* doing discovery but dont have enough space for the padding flag byte */
+	ulogf_dbg("MTU Discovery requires fragmentation");
+	return EFRAG_FLAG_FIRST;
+}
+
+static inline int
+_mtu_rm_padding_from_pkt(packet_t *restrict pkt)
+{
+	int64_t i = pkt->length - 1;
+	while (pkt->data[i] == 0 && i > 0) i--;
+	if (pkt->data[i] != 1) return 0;
+	pkt->length = i;
+	return 1;
+}
+
+static inline int
 _conn_udp_send(netconn_t *restrict conn, usocket_addr_t *restrict addr)
 {
 	size_t length = packet_get_length(conn->out_packet);
-	if (usock_udp_send(&conn->udp_sock, addr, conn->out_buffer, length))
+	if (usock_udp_send(&conn->udp_sock, addr, conn->out_buffer, length)) {
 		conn->stats.total_sent_bytes += length;
+		return 1;
+	}
+	return 0;
 }
 
 static inline void
-_conn_prepare_outpkt(netconn_t *restrict conn, struct conncommon *restrict c)
+_conn_prepare_outpkt(netconn_t *restrict conn, struct conncommon *restrict c, uint8_t status, uint8_t frag_flag, uint8_t secure, int32_t first_diff)
 {
 	packet_rewind(conn->out_packet);
 	packet_w_16_t(conn->out_packet, &conn->tick_local);
-	packet_w_bits(conn->out_packet, c->status, EPROT_STATUS_SIZE);
+
+	packet_w_bits(conn->out_packet, frag_flag, EFRAG_FLAG_SIZE_BITS);
+	ulogf_dbg("Write frag flag: %"PRIu8, frag_flag);
+	if (frag_flag == EFRAG_FLAG_MIDDLE || frag_flag == EFRAG_FLAG_LAST) {
+		assert_dbg(conn->out_packet->length == PROTO_HEADER_FRAG_SIZE);
+		packet_w_bits(conn->out_packet, first_diff, 8 - EFRAG_FLAG_SIZE_BITS);
+		return;
+	}
+
+	const int noresp_max = (0xFF >> EFRAG_FLAG_SIZE_BITS);
+	packet_w_bits(conn->out_packet, c->tick_local_noresp_count > noresp_max? noresp_max : c->tick_local_noresp_count, 8 - EFRAG_FLAG_SIZE_BITS);
+
+	ulogf_dbg("Write status: %"PRIu8, status);
+	packet_w_bits(conn->out_packet, status, EPROT_STATUS_SIZE);
 	packet_w_bits(conn->out_packet, c->round_trip_flag_expected, 1);
 	packet_w_bits(conn->out_packet, c->remote.round_trip_flag_echo, 1);
-	/* secure bits are written at _conn_payload_secure */
-	packet_rewind(conn->payload_packet);
+	packet_w_bits(conn->out_packet, secure, 2);
+
+	/* write mtu discovery reply */
+	if (status == EPROT_STATUS_CONNECTED_MTU_DISCOVERY_REPLY_DISCOVERY ||
+		status == EPROT_STATUS_CONNECTED_MTU_DISCOVERY_REPLY) {
+		packet_w_16_t(conn->out_packet, &c->remote.mtu_reply);
+	}
+
+	assert_dbg(conn->out_packet->length == PROTO_HEADER_SIZE(status));
 }
 
 static inline int
 _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict c)
 {
+	if (c->status == EPROT_STATUS_CONNECTED && c->remote.status == EPROT_STATUS_CONNECT)
+		return 0;
+
 	int ret = tick_remote_applicable(c->remote.tick, c->tick_remote_latest, c->tick_local, conn->settings.expected_tick_tolerance) || c->tick_local_noresp_count > 16384;
 	if (!ret) return 0;
 
@@ -238,7 +364,7 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 		/* decrypt */
 		ret = !crypto_decrypt_packet(&c->crypto.rx, conn->in_packet, conn->payload_packet);
 
-	} else if (c->remote.secure == ESECURE_AUTH) {
+	} else if (c->remote.secure == ESECURE_AUTH && c->remote.frag_flag == EFRAG_FLAG_NONE) {
 		ulogf_dbg("Received authenticated payload");
 		uint8_t rx_hash[crypto_shorthash_BYTES];
 		uint8_t hash[crypto_shorthash_BYTES];
@@ -256,8 +382,10 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 			return 0;
 
 		/* verify authenticity */
-		if (memcmp(hash, rx_hash, sizeof(hash)) != 0)
+		if (memcmp(hash, rx_hash, sizeof(hash)) != 0) {
+			ulogf_wrn("Auth failed, dropping packet.");
 			return 0;
+		}
 
 		/* passthrough */
 		packet_rw_packet(conn->in_packet, conn->payload_packet, packet_get_readable(conn->in_packet));
@@ -269,11 +397,125 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 		c->tick_remote_latest 	= c->remote.tick;
 		c->tick_local_noresp_count = 0;
 	}
+	if (c->remote.payload_padding) {
+		ret = _mtu_rm_padding_from_pkt(conn->payload_packet);
+		ulogf_dbg("%s padding from payload", ret? "Removed" : "Failed to remove");
+	}
 	return ret;
 }
 
+/* fragmented packets are authenticated by default */
 static inline int
-_conn_payload_secure(netconn_t *restrict conn, struct conncommon *restrict c)
+_conn_udp_send_fragmented(netconn_t *restrict conn, usocket_addr_t *restrict addr, struct conncommon *restrict c, packet_t *pkt_in, size_t mtu, uint8_t secure, uint8_t status)
+{
+	ulogf_dbg("Fragmented send");
+	uint8_t hash[crypto_shorthash_BYTES];
+
+	packet_rewind(conn->out_packet);
+	uint8_t ret = EFRAG_FLAG_FIRST;
+
+	netfrag_slicer_t slicer = {0};
+	slicer.frag_size = mtu - (PROTO_HEADER_FRAG_SIZE + sizeof(hash));
+	slicer.pkt_in = pkt_in;// conn->payload_packet;
+	slicer.pkt_frag_out = conn->out_packet;
+	
+	/* at 128 tick/s ~= 78 * 10us ~= 0.78ms */
+	int max_retries = 10000 / (int)conn->settings.tick_rate;
+
+	const int32_t first_diff = PROTO_HEADER_FRAG_SIZE - PROTO_HEADER_SIZE(status);
+	assert_dbg(first_diff < 0);
+
+	do {
+		_conn_prepare_outpkt(conn, c, status, ret, secure, -first_diff);
+
+		/* write nonce */
+		uint32_t nonce_idx = conn->out_packet->index;
+		packet_w(conn->out_packet, &c->crypto.auth_tx.nonce, sizeof(c->crypto.auth_tx.nonce));
+
+		/* write slice */
+		ret = netfrag_slice_next(&slicer, first_diff);
+
+		/* hash */
+		crypto_shorthash(hash, conn->out_packet->data, conn->out_packet->length, c->crypto.auth_tx.key);
+
+		/* replace nonce with hash */
+		memcpy(conn->out_packet->data + nonce_idx, hash, sizeof(hash));
+
+		int r;
+		do {
+			r = _conn_udp_send(conn, addr);
+			if (!r && slicer.frag_idx == 1) {
+				/* network or os cant keep up, and nothing was sent */
+				return 0;
+			} else if (!r) {
+				/* at least one fragment was already sent. keep trying */
+				utime_usleep(10);
+				max_retries--;
+			}
+		} while (!r && max_retries > 0);
+
+	} while (ret != EFRAG_FLAG_NONE);
+
+	return 1;
+}
+
+static inline int
+_conn_fragmented_reassemble(netconn_t *restrict conn, struct conncommon *restrict c, conn_header_t *restrict remote)
+{
+	if (remote->frag_flag == EFRAG_FLAG_NONE)
+		return ENETFRAG_DONE;
+	if (c->handshake_status < EHANDSHAKE_STATUS_SERVER_OK)
+		return ENETFRAG_OK;
+	
+	/* avoid wasting cpu time on intentionally dropped packets */
+	if (netfrag_multibuilder_being_dropped(&c->fragbuilder, remote->tick))
+		return ENETFRAG_OK;
+	
+	ulogf_dbg("Received a fragment");
+
+	/* offset nonce for this fragment */
+	int32_t nonce_diff = tick_diff(remote->tick, c->tick_remote_latest);
+	uint64_t rx_nonce = c->crypto.auth_rx.nonce + nonce_diff;
+
+	uint8_t rx_hash[crypto_shorthash_BYTES];
+	uint8_t hash[crypto_shorthash_BYTES];
+	uint8_t *nonce = conn->in_packet->data + conn->in_packet->index;
+		
+	/* store received hash */
+	if (packet_r(conn->in_packet, rx_hash, sizeof(rx_hash)))
+		return ENETFRAG_OK;
+
+	/* overwrite received hash with nonce */
+	memcpy(nonce, &rx_nonce, sizeof(rx_nonce));
+
+	/* hash */
+	if (crypto_shorthash(hash, conn->in_packet->data, conn->in_packet->length, c->crypto.auth_rx.key))
+		return ENETFRAG_OK;
+
+	/* verify authenticity */
+	if (memcmp(hash, rx_hash, sizeof(hash)) != 0) {
+		ulogf_wrn("Auth failed, dropping fragment.");
+		return ENETFRAG_OK;
+	}
+
+	int32_t first_diff = 0;
+	if (remote->frag_flag == EFRAG_FLAG_MIDDLE) {
+		first_diff = -remote->frag_shared.frag_first_diff;
+	}
+
+	packet_t *pkt = NULL;
+	int err = netfrag_multibuilder_reconstruct(&c->fragbuilder, conn->in_packet, first_diff, remote, &pkt);
+	if (err == ENETFRAG_DONE) {
+		packet_t *dst_pkt = remote->secure == ESECURE_ENCRYPT? conn->in_packet : conn->payload_packet;
+		packet_rewind(dst_pkt);
+		packet_rw_packet(pkt, dst_pkt, packet_get_readable(pkt));
+		packet_rewind(dst_pkt);
+	}
+	return err;
+}
+
+static inline int
+_conn_payload_secure(netconn_t *restrict conn, struct conncommon *restrict c, usocket_addr_t *restrict addr)
 {
 	packet_rewind(conn->payload_packet);
 	if (c->handshake_status == EHANDSHAKE_STATUS_CLIENT_OK) {
@@ -281,14 +523,49 @@ _conn_payload_secure(netconn_t *restrict conn, struct conncommon *restrict c)
 		if (conn->payload_packet->length == 0)
 			secure = ESECURE_AUTH;
 
-		packet_w_bits(conn->out_packet, secure, 2);
+		const size_t secure_overhead[] = {
+			[ESECURE_ENCRYPT] = crypto_cipher_mac_size(c->crypto.tx.type),
+			[ESECURE_AUTH] = crypto_shorthash_BYTES,
+			[ESECURE_NONE] = 0
+		};
+	
+		uint8_t frag_flag = EFRAG_FLAG_NONE;
+		uint8_t status = c->status;
+		size_t mtu = _mtuv[0];
+
+		if (status == EPROT_STATUS_CONNECTED) {
+			_conn_mtu_send_prepass(conn, c);
+			status = _conn_outpkt_header_mtu_status(c);
+			size_t header_overhead = PROTO_HEADER_SIZE(status) + secure_overhead[secure];
+			frag_flag = _conn_mtu_send_pass(conn, c, header_overhead, &mtu);
+
+			if (frag_flag == EFRAG_FLAG_NONE) {	
+				size_t final_size = conn->payload_packet->length + header_overhead;
+				frag_flag = (final_size > mtu? EFRAG_FLAG_FIRST : EFRAG_FLAG_NONE);
+			}
+		}
 
 		if (secure == ESECURE_ENCRYPT) {
 			ulogf_dbg("Write encrypted; tick: %d, tick_local: %d, tx nonce[0]: %d", conn->tick_local, c->tick_local, c->crypto.tx.data[0]);
+			
+			if (frag_flag) {
+				packet_rewind(conn->in_packet);
+				crypto_encrypt_packet(&c->crypto.tx, conn->payload_packet, conn->in_packet);
+				packet_rewind(conn->in_packet);
+				return _conn_udp_send_fragmented(conn, addr, c, conn->in_packet, mtu, secure, status);
+			}
+
+			_conn_prepare_outpkt(conn, c, status, frag_flag, secure, 0);
 			crypto_encrypt_packet(&c->crypto.tx, conn->payload_packet, conn->out_packet);
 		} else if (secure == ESECURE_AUTH) {
 			ulogf_dbg("Write authenticated");
+
+			if (frag_flag)
+				return _conn_udp_send_fragmented(conn, addr, c, conn->payload_packet, mtu, secure, status);
+
 			uint8_t hash[crypto_shorthash_BYTES];
+			
+			_conn_prepare_outpkt(conn, c, status, frag_flag, secure, 0);
 
 			/* write nonce */
 			uint32_t nonce_idx = conn->out_packet->index;
@@ -304,25 +581,24 @@ _conn_payload_secure(netconn_t *restrict conn, struct conncommon *restrict c)
 			memcpy(conn->out_packet->data + nonce_idx, hash, sizeof(hash));
 
 		} else {
+			_conn_prepare_outpkt(conn, c, status, frag_flag, secure, 0);
 			packet_rw_packet(conn->payload_packet, conn->out_packet, packet_get_length(conn->payload_packet));
 		}
-	} else {
-		ulogf_dbg("Write unauthenticated");
-		packet_w_bits(conn->out_packet, ESECURE_NONE, 2);
-		packet_rw_packet(conn->payload_packet, conn->out_packet, packet_get_length(conn->payload_packet));
+		return _conn_udp_send(conn, addr);
 	}
 
-	return 1;
+	ulogf_dbg("Write unauthenticated");
+	_conn_prepare_outpkt(conn, c, c->status, EFRAG_FLAG_NONE, ESECURE_NONE, 0);
+	packet_rw_packet(conn->payload_packet, conn->out_packet, packet_get_length(conn->payload_packet));
+	return _conn_udp_send(conn, addr);
 }
 
 static inline void
 _send_disconnect(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr, uint8_t reason, struct conncommon *restrict c)
 {
-	_conn_prepare_outpkt(conn, c);
+	packet_rewind(conn->payload_packet);
 	packet_w_8_t(conn->payload_packet, &reason);
-	_conn_payload_secure(conn, c);
-	_conn_udp_send(conn, cli_addr);
-	ulogf_dbg("Sent client disconnect: %s:%d", inet_ntoa(cli_addr->tcp_udp.sin_addr), ntohs(cli_addr->tcp_udp.sin_port));
+	_conn_payload_secure(conn, c, cli_addr);
 	ulogf_dbg("Sent client disconnect: %s:%"PRIu16, inet_ntoa(cli_addr->tcp_udp.sin_addr), ntohs(cli_addr->tcp_udp.sin_port));
 }
 
@@ -340,13 +616,52 @@ _server_client_disconnect(netconn_t *restrict conn, netsrvclient_t *c, uint8_t r
 	c->common.tick_remote_latest = 0;
 }
 
+static inline int
+_conncommon_init(netconn_t *restrict conn, struct conncommon *restrict c)
+{
+	if (!netmsg_init(&c->msgctx, 256))
+		return 0;
+
+	uint32_t max_pkt_sz = conn->settings.frag_max_recv_packet_size;
+	max_pkt_sz = max_pkt_sz? (max_pkt_sz < 4096? 4096 : max_pkt_sz) : 65535;
+	if (!netfrag_multibuilder_init(&c->fragbuilder, max_pkt_sz, conn->settings.frag_prealloc_packet_size, _mtuv[0])) {
+		netmsg_deinit(&c->msgctx);
+		return 0;
+	}
+
+	return 1;
+}
+
+static inline void
+_conncommon_deinit(struct conncommon *restrict c)
+{
+	netmsg_deinit(&c->msgctx);
+	netfrag_multibuilder_deinit(&c->fragbuilder);
+}
+
 static inline void
 _server_client_free(netconn_t *restrict conn, netsrvclient_t *c)
 {
 	ulogf_dbg("Removed client: %s:%"PRIu16, server_cli_get_addrstr(c), server_cli_get_port(c));
 	HASH_DEL(conn->data.srv.connected_clients, c);
-	netmsg_deinit(&c->common.msgctx);
+	_conncommon_deinit(&c->common);
 	ufree(c);
+}
+
+static inline int
+_conncommon_mtu_config(struct conncommon *restrict c, usocket_addr_t *restrict addr)
+{
+	int mtu = usock_udp_get_local_mtu(addr);
+	if (!mtu) {
+		ulogf_crt("Failed to obtain interface MTU for %s:%"PRIu16, inet_ntoa(addr->tcp_udp.sin_addr), ntohs(addr->tcp_udp.sin_port));
+		return 0;
+	}
+	mtu -= 28;
+	c->mtu_local_max = mtu;
+	c->mtu = mtu;
+	for (c->mtu_idx = 0; c->mtu > _mtuv[c->mtu_idx] && c->mtu_idx < MTUV_LENGTH-1; c->mtu_idx++);
+	ulogf_ntc("Interface MTU (%s:%"PRIu16"): %"PRIu16, inet_ntoa(addr->tcp_udp.sin_addr), ntohs(addr->tcp_udp.sin_port), c->mtu);
+	return 1;
 }
 
 static inline netsrvclient_t *
@@ -359,7 +674,13 @@ _server_client_init(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr,
 	}
 	memset(client, 0, sizeof(*client));
 
-	if (!netmsg_init(&client->common.msgctx, 32)) {
+	if (!_conncommon_init(conn, &client->common)) {
+		ufree(client);
+		return NULL;
+	}
+
+	if (!_conncommon_mtu_config(&client->common, &conn->udp_sock.addr)) {
+		_conncommon_deinit(&client->common);
 		ufree(client);
 		return NULL;
 	}
@@ -370,7 +691,7 @@ _server_client_init(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr,
 	HASH_ADD(hh, conn->data.srv.connected_clients, id, sizeof(cli_id), client);
 
 	if (ufavonet_global.uthash_oom) {
-		netmsg_deinit(&client->common.msgctx);
+		_conncommon_deinit(&client->common);
 		ufree(client);
 		ulogf_crt("uthash OOM");
 		ufavonet_global.uthash_oom = 0;
@@ -713,6 +1034,17 @@ _conn_recv(netconn_t *restrict conn, usocket_addr_t *restrict addr, conn_header_
 	/* Read header */
 	err = packet_r_16_t(conn->in_packet, &remote->tick);
 	if (err) return 0;
+	err = packet_r_bits(conn->in_packet, &remote->frag_flag, EFRAG_FLAG_SIZE_BITS);
+	if (err) return 0;
+	err = packet_r_bits(conn->in_packet, &remote->frag_shared.noresp, 8 - EFRAG_FLAG_SIZE_BITS);
+	if (err) return 0;
+
+	remote->payload_padding = 0;
+	if (remote->frag_flag == EFRAG_FLAG_MIDDLE || remote->frag_flag == EFRAG_FLAG_LAST) {
+		assert_dbg(conn->in_packet->index == PROTO_HEADER_FRAG_SIZE);
+		return 1;
+	}
+
 	err = packet_r_bits(conn->in_packet, &remote->status, EPROT_STATUS_SIZE);
 	if (err) return 0;
 	err = packet_r_bits(conn->in_packet, &remote->round_trip_flag_echo, 1);
@@ -722,6 +1054,31 @@ _conn_recv(netconn_t *restrict conn, usocket_addr_t *restrict addr, conn_header_
 	err = packet_r_bits(conn->in_packet, &remote->secure, 2);
 	if (err) return 0;
 
+	remote->mtu = 0;
+	uint8_t recv_status = remote->status;
+	if (remote->status == EPROT_STATUS_CONNECTED_MTU_DISCOVERY) {
+		remote->status = EPROT_STATUS_CONNECTED;
+		/* The other side is performing MTU discovery. This side must include the number of bytes received in it's reply. */
+		remote->mtu_reply = (uint16_t)packet_get_length(conn->in_packet);
+		remote->payload_padding = remote->frag_flag == EFRAG_FLAG_NONE;
+	} else if (remote->status == EPROT_STATUS_CONNECTED_MTU_DISCOVERY_REPLY) {
+		remote->status = EPROT_STATUS_CONNECTED;
+		/* This side is performing MTU discovery and the other side received the payload. */
+		err = packet_r_16_t(conn->in_packet, &remote->mtu);
+		if (err) return 0;
+	} else if (remote->status == EPROT_STATUS_CONNECTED_MTU_DISCOVERY_REPLY_DISCOVERY) {
+		remote->status = EPROT_STATUS_CONNECTED;
+		/* both cases */
+		/* The other side is performing MTU discovery. This side must include the number of bytes received in it's reply. */
+		remote->mtu_reply = (uint16_t)packet_get_length(conn->in_packet);
+		remote->payload_padding = remote->frag_flag == EFRAG_FLAG_NONE;
+		/* This side is performing MTU discovery and the other side received the payload. */
+		err = packet_r_16_t(conn->in_packet, &remote->mtu);
+		if (err) return 0;
+	}
+	ulogf_dbg("status: %"PRIu8", padding: %"PRIu8 ", frag_flag: %"PRIu8, recv_status, remote->payload_padding, remote->frag_flag);
+
+	assert_dbg(conn->in_packet->index == PROTO_HEADER_SIZE(recv_status));
 	return 1;
 }
 
@@ -749,6 +1106,24 @@ _conncommon_tick(struct conncommon *restrict c, float rtt_ema_alpha)
 	}
 }
 
+/* retain and keep sending the largest mtu_reply for at least 1 second after it was received */
+static inline uint16_t
+_mtu_retain_reply(struct conncommon *restrict c, uint16_t late_mtu_reply, uint16_t mtu_reply, uint16_t tick_rate)
+{
+	uint16_t r = mtu_reply;
+	if (c->remote.mtu_reply) {
+		if (c->mtu_reply_retention < tick_rate) {
+			if (late_mtu_reply > mtu_reply) {
+				r = late_mtu_reply;
+				c->mtu_reply_retention = 0;
+			}
+		} else {
+			c->mtu_reply_retention = 0;
+		}
+		c->mtu_reply_retention++;
+	}
+	return r;
+}
 
 static inline netsrvclient_t *
 _server_recv(netconn_t *restrict conn)
@@ -779,6 +1154,10 @@ _server_recv(netconn_t *restrict conn)
 		if (conn->data.srv.is_closing)
 			return NULL;
 
+		/* fragmented packets are not allowed in this state */
+		if (remote.frag_flag != EFRAG_FLAG_NONE)
+			return NULL;
+
 		/* initialize client */
 		client = _server_client_init(conn, &cli_addr, cli_id);
 		if (!client) {
@@ -792,19 +1171,34 @@ _server_recv(netconn_t *restrict conn)
 		client->common.handshake_status 	= EHANDSHAKE_STATUS_TICK_SYNC;
 	}
 
+	/* reassemble fragmented packets */
+	switch (_conn_fragmented_reassemble(conn, &client->common, &remote)) {
+		case ENETFRAG_DONE: break;
+		case ENETFRAG_OK: return NULL;
+		case ENETFRAG_ERROR:
+			_server_client_disconnect(conn, client, EDISCONNECT_INTERNAL_ERROR);
+			return NULL;
+		case ENETFRAG_VIOLATION:
+			_server_client_disconnect(conn, client, EDISCONNECT_PROTOCOL_VIOLATION);
+			return NULL;
+	}
+
+	remote.mtu_reply = _mtu_retain_reply(&client->common, client->common.remote.mtu_reply, remote.mtu_reply, conn->settings.tick_rate);
 	client->common.remote = remote;
 	return client;
 }
 
-static inline void
+static inline int
 _server_process_recv(netconn_t *restrict conn)
 {
 	int i;
+	int recv_cnt = 0;
 	/* Receive data from clients */
 	for (i = 2; i;) {
 		netsrvclient_t *c = _server_recv(conn);
 		if (!c) { i--; continue; }
-		
+		recv_cnt++;
+
 		int applicable = _conn_payload_from_secure(conn, &c->common);
 		if (!applicable) continue;
 
@@ -855,6 +1249,7 @@ _server_process_recv(netconn_t *restrict conn)
 
 		i = 2;
 	}
+	return recv_cnt;
 }
 
 static inline void
@@ -899,8 +1294,8 @@ _server_process_send(netconn_t *restrict conn)
 
 			const uint16_t timeout_ticks = client->common.status == EPROT_STATUS_CONNECT? conn->settings.pending_conn_timeout_tick : conn->settings.timeout_tick;
 			if (client->common.tick_local_noresp_count == timeout_ticks) {
-				_send_disconnect(conn, &client->sockaddr, client->common.disconnect_reason, &client->common);
 				_server_client_disconnect(conn, client, EDISCONNECT_TIMEOUT);
+				_send_disconnect(conn, &client->sockaddr, client->common.disconnect_reason, &client->common);
 				goto next_client;
 			}
 		}
@@ -909,7 +1304,7 @@ _server_process_send(netconn_t *restrict conn)
 			goto next_client;
 
 		/* prepare packet */
-		_conn_prepare_outpkt(conn, &client->common);
+		packet_rewind(conn->payload_packet);
 
 		/* write messages */
 		int32_t err = netmsg_pack(&client->common.msgctx, conn->payload_packet, (uint8_t)client->common.round_trip_ticks_ema);
@@ -935,15 +1330,14 @@ _server_process_send(netconn_t *restrict conn)
 			}
 		}
 
-		_conn_payload_secure(conn, &client->common);
-		_conn_udp_send(conn, &client->sockaddr);
+		_conn_payload_secure(conn, &client->common, &client->sockaddr);
 
 next_client:
 		client = client->hh.next;
 	}
 }
 
-static inline void
+static inline int
 _client_process_recv(netconn_t **__conn)
 {
 	netconn_t *conn = *__conn;
@@ -951,11 +1345,31 @@ _client_process_recv(netconn_t **__conn)
 
 	if (s->status == EPROT_STATUS_DISCONNECT &&
 		s->remote.status == EPROT_STATUS_DISCONNECT)
-		return;
+		return 0;
+
+	int recv_cnt = 0;
 
 	while (1) {
-		if (!_conn_recv(conn, &conn->udp_sock.addr, &s->remote))
-			return;
+		conn_header_t remote = s->remote;		
+		if (!_conn_recv(conn, &conn->udp_sock.addr, &remote))
+			return recv_cnt;
+		
+		recv_cnt++;
+
+		/* reassemble fragmented packets */
+		switch (_conn_fragmented_reassemble(conn, s, &remote)) {
+			case ENETFRAG_DONE: break;
+			case ENETFRAG_OK: continue;
+			case ENETFRAG_ERROR:
+				_client_disconnect(__conn, EDISCONNECT_INTERNAL_ERROR);
+				return 0;
+			case ENETFRAG_VIOLATION:
+				_client_disconnect(__conn, EDISCONNECT_PROTOCOL_VIOLATION);
+				return 0;
+		}
+
+		remote.mtu_reply = _mtu_retain_reply(s, s->remote.mtu_reply, remote.mtu_reply, conn->settings.tick_rate);
+		s->remote = remote;
 
 		/* sync first tick */
 		if (s->handshake_status == EHANDSHAKE_STATUS_NONE) {
@@ -969,7 +1383,7 @@ _client_process_recv(netconn_t **__conn)
 
 		/* handle disconnection */
 		if (s->status == EPROT_STATUS_DISCONNECT)
-			return;
+			return recv_cnt;
 
 		if (s->remote.status == EPROT_STATUS_DISCONNECT) {
 			uint8_t reason;
@@ -978,13 +1392,13 @@ _client_process_recv(netconn_t **__conn)
 			/* report back to the server */
 			_send_disconnect(conn, &conn->udp_sock.addr, reason, s);
 			_client_disconnect(__conn, reason);
-			return;
+			return 0;
 		}
 
 		/* handle messages */
 		if (!_client_netmsg_unpack_all(__conn, conn->payload_packet)) {
 			/* error. connection being dropped. */
-			return;
+			return recv_cnt;
 		}
 
 		s->status = s->remote.status;
@@ -993,6 +1407,7 @@ _client_process_recv(netconn_t **__conn)
 		
 		conn->data.cli.events.onreceivepkt(conn, conn->userdata, conn->payload_packet);
 	}
+	return recv_cnt;
 }
 
 static inline void
@@ -1014,7 +1429,7 @@ _client_process_send(netconn_t **__conn)
 	}
 
 	if (s->status == EPROT_STATUS_DISCONNECT) {
-		if (s->tick_remote_latest++ == conn->settings.kick_notice_tick) {
+		if (s->tick_remote_latest++ >= conn->settings.kick_notice_tick) {
 			/* Disconnect notice already sent multiple times */
 			s->remote.status = EPROT_STATUS_DISCONNECT;
 			_client_disconnect(__conn, s->disconnect_reason);
@@ -1037,7 +1452,7 @@ _client_process_send(netconn_t **__conn)
 
 	
 	/* prepare packet */
-	_conn_prepare_outpkt(conn, s);
+	packet_rewind(conn->payload_packet);
 
 	/* write messages */
 	int32_t err = netmsg_pack(&conn->data.cli.common.msgctx, conn->payload_packet, (uint8_t)s->round_trip_ticks_ema);
@@ -1063,8 +1478,7 @@ _client_process_send(netconn_t **__conn)
 		}
 	}
 
-	_conn_payload_secure(conn, s);
-	_conn_udp_send(conn, &conn->udp_sock.addr);
+	_conn_payload_secure(conn, s, &conn->udp_sock.addr);
 }
 
 static inline netconn_t *
@@ -1343,7 +1757,8 @@ client_init(const struct clievents events, const struct netsettings settings, vo
 	if (!conn) return NULL;
 	conn->data.cli.events = events;
 	conn->type = ETYPE_CLIENT;
-	if (!netmsg_init(&conn->data.cli.common.msgctx, 128)) {
+
+	if (!_conncommon_init(conn, &conn->data.cli.common)) {
 		_conn_deinit(conn);
 		return NULL;
 	}
@@ -1365,7 +1780,13 @@ client_secure_pubkey_import(netconn_t *restrict conn, const uint8_t *restrict in
 int
 client_connect(netconn_t *restrict conn, enum netconn_protocol proto, const char *restrict hostname, uint16_t port)
 {
-	return _conn_socket_init(conn, proto, hostname, port);
+	if (!_conn_socket_init(conn, proto, hostname, port)) return 0;
+	
+	if (!_conncommon_mtu_config(&conn->data.cli.common, &conn->udp_sock.addr)) {
+		usock_udp_deinit(&conn->udp_sock);
+		return 0;
+	}
+	return 1;
 }
 
 void
@@ -1374,6 +1795,7 @@ client_disconnect(netconn_t *restrict conn)
 	if (!conn) return;
 	conn->data.cli.common.status = EPROT_STATUS_DISCONNECT;
 	conn->data.cli.common.disconnect_reason = EDISCONNECT;
+	conn->data.cli.common.tick_remote_latest = 0;
 }
 
 int32_t
@@ -1419,7 +1841,7 @@ conn_free(netconn_t **conn)
 		server_cleanup(*conn);
 
 	if ((*conn)->type == ETYPE_CLIENT)
-		netmsg_deinit(&(*conn)->data.cli.common.msgctx);
+		_conncommon_deinit(&(*conn)->data.cli.common);
 
 	_conn_deinit(*conn);
 	*conn = NULL;
@@ -1437,10 +1859,30 @@ conn_tick(netconn_t **conn)
 	}
 }
 
+inline int
+conn_recv(netconn_t **conn)
+{
+	if (!conn) 	return 0;
+	if (!*conn) return 0;
+
+	switch ((*conn)->type) {
+		case ETYPE_CLIENT:
+			return _client_process_recv(conn);
+		case ETYPE_SERVER:
+			if (!(*conn)->data.srv.is_closing)
+				return _server_process_recv(*conn);
+			break;
+	}
+	return 0;
+}
+
 inline int_fast64_t
 conn_process_non_blocking(netconn_t **conn)
 {
 	if (!conn)	return 0;
+	if (!*conn)	return 0;
+
+	conn_recv(conn);
 	if (!*conn)	return 0;
 
 	const int_fast64_t target_us = (*conn)->tick_time_target_us;
@@ -1489,6 +1931,22 @@ conn_process_blocking_relaxed(netconn_t **conn, double relax_ratio)
 	int_fast64_t remaining_us = conn_process_non_blocking(conn);
 
 	int_fast64_t relaxed_us = remaining_us * relax_ratio;
+
+	if (relaxed_us > margin) {
+		utime_t t = {0};
+		utime_remaining(&t, relaxed_us);
+		remaining_us = relaxed_us;
+		int cnt = 20;
+		while (remaining_us > margin && cnt) {
+			cnt--;
+			if (conn_recv(conn)) {
+				cnt = 20;
+				utime_usleep(10);
+			}
+			remaining_us = utime_remaining(&t, relaxed_us);
+		}
+		relaxed_us = remaining_us;
+	}
 
 	if (relaxed_us > margin)
 		utime_usleep(relaxed_us);

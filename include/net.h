@@ -21,6 +21,10 @@
 #ifndef __UFAVONET_NET_HEADER__
 #define __UFAVONET_NET_HEADER__
 
+#include <stdint.h>
+#include <stddef.h>
+#include "packet.h"
+
 enum netconn_disconnect_reason
 {
 	/* The server disconnected the client with no reason */
@@ -90,6 +94,13 @@ typedef struct netconn netconn_t;
 typedef struct srvclient netsrvclient_t;
 
 struct netsettings {
+	/* Incoming packets exceeding this size will be dropped.
+	 * Each connection will require up to three times this amount of additional memory.
+	 * Useful for limiting resource usage (as fragmented packets require more memory and cpu time).
+	 * Min: 4096; When unset defaults to 65535; */
+	uint32_t 	frag_max_recv_packet_size;
+	/* Preallocs backing packets for fragmented reassemble. When unset nothing is prealloc'ed. */
+	uint32_t 	frag_prealloc_packet_size;
 	/* Amount of ticks with no successful authentication. 
 	 * When this value is exceeded during a pending connection state the client is kicked.
 	 * Should not exceed 16384 (2^14). 
@@ -235,6 +246,11 @@ const struct netstats *conn_get_stats(netconn_t *restrict conn);
  * the event (`onsrvclose` when a server; `ondisconnect` when a client) is triggered.
  * Can be called safely even with `NULL` values. */
 void conn_tick(netconn_t **conn);
+/* Receives and processes pending packets. Can be used to minimize loss or delay when manually controlling
+ * the tick rate with `conn_tick()` (especially when dealing with fragmented packets).
+ * Can be called multiple times per tick. 
+ * Returns the number of received packets. */
+int conn_recv(netconn_t **conn);
 
 /* Runs a tick `tick_rate` times per second. Should be called in a loop that runs fast enough to keep up 
  * with `tick_rate`. Returns immediately (i.e. doesn't block waiting for the appropriate time to run the tick).
