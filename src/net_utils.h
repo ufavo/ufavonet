@@ -4,6 +4,7 @@
 	#include <winsock2.h>
 	#define SOCKET_INVALID (int)INVALID_SOCKET
 	#define SOCKETWOULDBLOCK (WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == WSAEINVAL)
+	#define errno WSAGetLastError()
 	typedef unsigned long in_addr_t;
 	typedef unsigned short in_port_t;
 	typedef int socklen_t;
