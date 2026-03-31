@@ -147,7 +147,7 @@ struct srvevents {
 	 * This event is only called for clients that got approved in the `onconnect` stage. */
 	void	(*onreceivepkt)(netconn_t *conn, void *userdata, packet_t *p_in, netsrvclient_t *client, void *cli_userdata);
 	/* Called when a message arrives. */
-	void 	(*onreceivemsg)(netconn_t *conn, void *userdata, void *data, size_t size, netsrvclient_t *client);
+	void 	(*onreceivemsg)(netconn_t *conn, void *userdata, packet_t *p_in, netsrvclient_t *client);
 	/* Called before the onsendpkt event occours for any client.
 	 * Only called once per tick. */
 	void 	(*bonsendpkt)(netconn_t *conn, void *userdata, netsrvclient_t *first);
@@ -170,7 +170,7 @@ struct clievents {
 	/* Called during a client tick if a valid packet is avaliable. */
 	void	(*onreceivepkt)(netconn_t *conn, void *userdata, packet_t *p_in);
 	/* Called when a message arrives. */
-	void 	(*onreceivemsg)(netconn_t *conn, void *userdata, void *data, size_t size);
+	void 	(*onreceivemsg)(netconn_t *conn, void *userdata, packet_t *p_in);
 	/* Called every client tick. */
 	void	(*onsendpkt)(netconn_t *conn, void *userdata, packet_t *p_out);
 };

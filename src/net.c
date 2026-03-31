@@ -743,9 +743,14 @@ _client_disconnect(netconn_t **__conn, uint8_t reason)
 static inline int
 _server_netmsg_unpack_all(netconn_t *restrict conn, netsrvclient_t *restrict client, packet_t *restrict p_in)
 {
+	packet_t tmp = {0};
 	_conn_netmsg_unpack_all(&client->common.msgctx, p_in, {
-		if (conn->data.srv.events.onreceivemsg)
-			conn->data.srv.events.onreceivemsg(conn, conn->userdata, data, size, client);
+		if (conn->data.srv.events.onreceivemsg) {
+			tmp.data = data;
+			tmp.size = size;
+			packet_rewind(&tmp);
+			conn->data.srv.events.onreceivemsg(conn, conn->userdata, &tmp, client);
+		}
 	}, {
 		_server_client_disconnect(conn, client, EDISCONNECT_INTERNAL_ERROR);
 		return 0;
@@ -988,6 +993,7 @@ _client_netmsg_unpack_all(netconn_t **__conn, packet_t *restrict p_in)
 {
 	netconn_t *conn = *__conn;
 	int once = 0;
+	packet_t tmp = {0};
 	_conn_netmsg_unpack_all(&conn->data.cli.common.msgctx, p_in, {
 		if (conn->data.cli.common.remote.status == EPROT_STATUS_CONNECT) {
 			if (once) {
@@ -998,8 +1004,12 @@ _client_netmsg_unpack_all(netconn_t **__conn, packet_t *restrict p_in)
 			if (!_client_netmsg_pack_connect(__conn, data, size))
 				return 0;
 			once++;
-		} else if (conn->data.cli.events.onreceivemsg)
-			conn->data.cli.events.onreceivemsg(conn, conn->userdata, data, size);
+		} else if (conn->data.cli.events.onreceivemsg) {
+			tmp.data = data;
+			tmp.size = size;
+			packet_rewind(&tmp);
+			conn->data.cli.events.onreceivemsg(conn, conn->userdata, &tmp);
+		}
 	}, {
 		_client_disconnect(__conn, EDISCONNECT_INTERNAL_ERROR);
 		return 0;
