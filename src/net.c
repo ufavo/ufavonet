@@ -753,9 +753,11 @@ _server_netmsg_unpack_all(netconn_t *restrict conn, netsrvclient_t *restrict cli
 			conn->data.srv.events.onreceivemsg(conn, conn->userdata, &tmp, client);
 		}
 	}, {
+		ulogf_wrn("Internal error during message unpacking");
 		_server_client_disconnect(conn, client, EDISCONNECT_INTERNAL_ERROR);
 		return 0;
 	}, {
+		ulogf_wrn("Protocol violation during message unpacking");
 		_server_client_disconnect(conn, client, EDISCONNECT_PROTOCOL_VIOLATION);
 		return 0;
 	});
@@ -945,9 +947,11 @@ _server_netmsg_unpack_onconnect(netconn_t *restrict conn, netsrvclient_t *restri
 		_server_netmsg_pack_connect(conn, client, data, size);
 		once = 1;
 	}, {
+		ulogf_wrn("Internal error during message unpacking");
 		_server_client_disconnect(conn, client, EDISCONNECT_INTERNAL_ERROR);
 		return 0;
 	}, {
+		ulogf_wrn("Protocol violation during message unpacking");
 		_server_client_disconnect(conn, client, EDISCONNECT_PROTOCOL_VIOLATION);
 		return 0;
 	});
@@ -1009,13 +1013,16 @@ _client_netmsg_unpack_all(netconn_t **__conn, packet_t *restrict p_in)
 		} else if (conn->data.cli.events.onreceivemsg) {
 			tmp.data = data;
 			tmp.size = size;
+			tmp.length = size;
 			packet_rewind(&tmp);
 			conn->data.cli.events.onreceivemsg(conn, conn->userdata, &tmp);
 		}
 	}, {
+		ulogf_wrn("Internal error during message unpacking");
 		_client_disconnect(__conn, EDISCONNECT_INTERNAL_ERROR);
 		return 0;
 	}, {
+		ulogf_wrn("Protocol violation during message unpacking");
 		_client_disconnect(__conn, EDISCONNECT_PROTOCOL_VIOLATION);
 		return 0;
 	});
@@ -1188,9 +1195,11 @@ _server_recv(netconn_t *restrict conn)
 		case ENETFRAG_DONE: break;
 		case ENETFRAG_OK: return NULL;
 		case ENETFRAG_ERROR:
+			ulogf_wrn("Internal error during frag reassemble");
 			_server_client_disconnect(conn, client, EDISCONNECT_INTERNAL_ERROR);
 			return NULL;
 		case ENETFRAG_VIOLATION:
+			ulogf_wrn("Protocol violation during frag reassemble");
 			_server_client_disconnect(conn, client, EDISCONNECT_PROTOCOL_VIOLATION);
 			return NULL;
 	}
@@ -1373,9 +1382,11 @@ _client_process_recv(netconn_t **__conn)
 			case ENETFRAG_DONE: break;
 			case ENETFRAG_OK: continue;
 			case ENETFRAG_ERROR:
+				ulogf_wrn("Internal error during frag reassemble");
 				_client_disconnect(__conn, EDISCONNECT_INTERNAL_ERROR);
 				return 0;
 			case ENETFRAG_VIOLATION:
+				ulogf_wrn("Protocol violation during frag reassemble");
 				_client_disconnect(__conn, EDISCONNECT_PROTOCOL_VIOLATION);
 				return 0;
 		}
