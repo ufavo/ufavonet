@@ -4,6 +4,7 @@
 #include <time.h>
 #include <string.h>
 #include <unistd.h>
+#include "include/hooks.h"
 #include "include/packet.h"
 #include "include/net.h"
 #include "src/netmsg.h"
@@ -227,10 +228,12 @@ test_netmsg()
 
 	uint32_t msgc = 20000;
 	uint64_t *msgv = malloc(sizeof(*msgv) * msgc);
+	uint8_t *msg_bytesv = malloc(sizeof(*msg_bytesv) * msgc);
 	
 	uint32_t i;
 	for (i = 0; i < msgc; i++) {
 		msgv[i] = (uint64_t)random();
+		msg_bytesv[i] = 1 + ((uint8_t)random() % (sizeof(*msgv) - 1));
 	}
 
 	uint32_t msg_rcv = 0;
@@ -240,8 +243,8 @@ test_netmsg()
 
 	// To start with, pack 200 groups to test MAX SEND behaviour.
 	for (; msg_enq < 200; msg_enq++) {
-		netmsg_enqueue(&a, msgv + msg_enq, sizeof(*msgv));
-		netmsg_pack(&a, pkt_from_a);
+		netmsg_enqueue(&a, msgv + msg_enq, msg_bytesv[msg_enq]);
+		netmsg_pack(&a, pkt_from_a, 0);
 		packet_rewind(pkt_from_a);
 	}
 	
@@ -252,10 +255,10 @@ test_netmsg()
 			if (enq > msgc)
 				enq = msgc;
 			for (; msg_enq < enq; msg_enq++)
-				netmsg_enqueue(&a, msgv + msg_enq, sizeof(*msgv));
+				netmsg_enqueue(&a, msgv + msg_enq, msg_bytesv[msg_enq]);
 		}
 		
-		netmsg_pack(&a, pkt_from_a);
+		netmsg_pack(&a, pkt_from_a, 0);
 		packet_rewind(pkt_from_a);
 //		puts("----END----");
 	
@@ -264,28 +267,30 @@ test_netmsg()
 		if (rand() % 4 != 2) {
 //			puts("-----B-----");
 			// Deliver to 'b'
-			while (netmsg_unpack_next(&b, pkt_from_a, &msg, &size) == ENETMSG_ERR_NONE) {
+			int32_t err;
+			do {
+				err = netmsg_unpack_next(&b, pkt_from_a, &msg, &size);
 				if (!msg) break;
 				if (msg_rcv == msgc) {
 					ulogf_emr("unpack_next attempted to unpack more messages than what's available");
 					goto fail;
 				}
-				if (size != sizeof(*msgv)) {
-					ulogf_emr("size mismatch\n");
+				if (size != (uint32_t)msg_bytesv[msg_rcv]) {
+					ulogf_emr("size mismatch %zu != %zu\n%"PRIu32, (size_t)size, (size_t)msg_bytesv[msg_rcv], msg_rcv);
 					goto fail;
 				}
-				if (memcmp(msg, msgv + msg_rcv, sizeof(*msgv)) != 0) {
-					ulogf_emr("contents mismatch\n");
+				if (memcmp(msg, msgv + msg_rcv, msg_bytesv[msg_rcv]) != 0) {
+					ulogf_emr("contents mismatch\n%"PRIu32, msg_rcv);
 					goto fail;
 				}
 				msg_rcv++;
-			}
+			} while (err == ENETMSG_ERR_NONE_AGAIN);
 			packet_rewind(pkt_from_a);
 //			puts("----END----");
 		} else a_drops++;
 		
 		// Pack b's response
-		netmsg_pack(&b, pkt_from_b);
+		netmsg_pack(&b, pkt_from_b, 0);
 		packet_rewind(pkt_from_b);
 
 		// Random packet drop
@@ -304,6 +309,7 @@ test_netmsg()
 	packet_free(&pkt_from_a);
 	packet_free(&pkt_from_b);
 	free(msgv);
+	free(msg_bytesv);
 	return EXIT_SUCCESS;
 fail:
 	netmsg_deinit(&a);
@@ -311,6 +317,7 @@ fail:
 	packet_free(&pkt_from_a);
 	packet_free(&pkt_from_b);
 	free(msgv);
+	free(msg_bytesv);
 	return EXIT_FAILURE;
 }
 
@@ -485,7 +492,7 @@ test_all()
 		.onsendpkt = &onsendpkt,
 		.onsrvclose = &onsrvclose
 	};
-
+	ufavonet_set_log_conf((const ufavonet_log_conf_t){.level = LOG_DEBUG});
 	netconn_t *cli_info = NULL, *srv_info = NULL;
 	/* initialize server and client */
 	srv_info = server_init(srvevents, settings, NULL);
