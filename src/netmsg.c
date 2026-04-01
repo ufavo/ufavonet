@@ -227,7 +227,6 @@ pkt_unpack_ackgroup(netmsg_ctx_t *restrict ctx, packet_t *restrict p)
 	memmove(pktstart, pktstart + pkt_idx, pkt_length);
 	packet_set_length(ctx->pkt, pkt_length);
 	packet_set_index(ctx->pkt, pkt_length);
-	packet_set_index(ctx->pkt, pkt_length);
 
 	return ENETMSG_ERR_NONE;
 }
@@ -327,7 +326,7 @@ netmsg_unpack_next(netmsg_ctx_t *restrict ctx, packet_t *restrict p, void **out,
 	if (tmp) {
 		// is a message. undo peek
 		packet_set_index(p, idx);
-		return ENETMSG_ERR_NONE;
+		return ENETMSG_ERR_NONE_AGAIN;
 	}
 
 	if (--ctx->unpack_cnt == 0) {
@@ -347,7 +346,7 @@ netmsg_unpack_next(netmsg_ctx_t *restrict ctx, packet_t *restrict p, void **out,
 
 	ctx->acknowledged_count++;
 
-	return ENETMSG_ERR_NONE;
+	return ENETMSG_ERR_NONE_AGAIN;
 }
 
 inline int32_t
