@@ -74,8 +74,8 @@ _packet_builder_update(netfrag_builder_t *restrict ctx, packet_t *restrict pkt_f
 {
 	uint32_t metadata;
 	
-	size_t index;
-	size_t slot_index;
+	size_t index = 0;
+	size_t slot_index = 0;
 
 	if (packet_r_32_t(pkt_frag_in, &metadata)) {
 		ulogf_err("Failed to read fragment metadata. Dropping packet");
