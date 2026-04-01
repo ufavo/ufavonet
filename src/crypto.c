@@ -261,27 +261,42 @@ crypto_nonce_sub(cipher_ctx_t *restrict ctx, uint64_t value)
 inline int
 crypto_encrypt_packet(cipher_ctx_t *restrict ctx, packet_t *restrict pkt_in, packet_t *restrict pkt_out)
 {
-	_boilerplate_pkt_encrypt(pkt_in, pkt_out, crypto_cipher_mac_size(ctx->type));
+	size_t m_len = (pkt_in->length - pkt_in->index);
+	/* get ptr to write the encrypted payload */
+	void *out = ((void *)0);
+	int err = packet_w_deferred(pkt_out, m_len + (crypto_cipher_mac_size(ctx->type)), &out);
+	if (err) return err;
 	void *add_data = NULL;
+
 	size_t add_data_len = 0;
 	if (pkt_out->index > 0) {
 		add_data = pkt_out->data;
 		add_data_len = pkt_out->index - m_len - crypto_cipher_mac_size(ctx->type);
 	}
-	return crypto_encrypt(ctx, pkt_in->data + pkt_in->index, m_len, add_data, add_data_len, out) * 100;
+
+	return crypto_encrypt(ctx, pkt_in->data + pkt_in->index, m_len, add_data, add_data_len, out);
 }
 
 inline int
 crypto_decrypt_packet(cipher_ctx_t *restrict ctx, packet_t *restrict pkt_in, packet_t *restrict pkt_out)
 {
-	_boilerplate_pkt_decrypt(pkt_in, pkt_out);
+	uint32_t mac = crypto_cipher_mac_size(ctx->type);
+	uint32_t m_len = pkt_in->length - pkt_in->index;
+	if (m_len < mac)
+		return ECRYPTO_ERR_DECRYPT;
+
+	/* get ptr to write the decrypted message */
+	void *out = NULL;
+	int err = packet_w_deferred(pkt_out, m_len - mac, &out);
+	if (err) return err;
+
 	void *add_data = NULL;
 	size_t add_data_len = 0;
 	if (pkt_in->index > 0) {
 		add_data = pkt_in->data;
 		add_data_len = pkt_in->index;
 	}
-	return crypto_decrypt(ctx, pkt_in->data + pkt_in->index, m_len + crypto_cipher_mac_size(ctx->type), add_data, add_data_len, out) * 100;
+	return crypto_decrypt(ctx, pkt_in->data + pkt_in->index, m_len, add_data, add_data_len, out);
 }
 
 const uint8_t *
