@@ -748,6 +748,7 @@ _server_netmsg_unpack_all(netconn_t *restrict conn, netsrvclient_t *restrict cli
 		if (conn->data.srv.events.onreceivemsg) {
 			tmp.data = data;
 			tmp.size = size;
+			tmp.length = size;
 			packet_rewind(&tmp);
 			conn->data.srv.events.onreceivemsg(conn, conn->userdata, &tmp, client);
 		}
@@ -962,6 +963,7 @@ _client_netmsg_pack_connect(netconn_t **__conn, void *data, size_t size)
 	_packet_init_from_buf(&pin, data, size);
 	packet_set_length(&pin, size);
 	packet_rewind(conn->out_packet);
+	conn->out_packet->length = 0;
 
 	if (conn->data.cli.common.handshake_status <= EHANDSHAKE_STATUS_TICK_SYNC) {
 		conn->data.cli.common.tick_local_noresp_count = 0;
@@ -1731,7 +1733,6 @@ int32_t
 server_cli_sendmessage(netsrvclient_t *restrict client, const void *restrict buffer, const uint32_t size)
 {
 	if (!client) return -1;
-	if (client->common.status != EPROT_STATUS_CONNECTED) return -1;
 	return netmsg_enqueue(&client->common.msgctx, buffer, size);
 }
 
