@@ -342,10 +342,6 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 	packet_rewind(conn->payload_packet);
 	int32_t nonce_diff = tick_diff(c->remote.tick, c->tick_remote_latest);
 	if (c->handshake_status >= EHANDSHAKE_STATUS_SERVER_OK) {
-		/* add rx nonce */
-		crypto_nonce_add(&c->crypto.rx, nonce_diff);
-		c->crypto.auth_rx.nonce += nonce_diff;
-
 		/* refuses unauthenticated packets after handshake */
 		if (c->remote.secure == ESECURE_NONE) {
 			c->tick_local 			= c->remote.tick;
@@ -360,22 +356,29 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 	}
 
 	if (c->remote.secure == ESECURE_ENCRYPT) {
-		ulogf_dbg("Received: self_tick: %d, tick_remote: %d, rx nonce[0]: %d, diff: %d", conn->tick_local, c->remote.tick, c->crypto.rx.data[0], nonce_diff);
+		/* offset nonce for this packet */
+		cipher_ctx_t rx = c->crypto.rx;
+		crypto_nonce_add(&rx, nonce_diff);
+
+		ulogf_dbg("Received: self_tick: %d, tick_remote: %d, rx nonce[0]: %d, diff: %d", conn->tick_local, c->remote.tick, rx.data[0], nonce_diff);
 		/* decrypt */
-		ret = !crypto_decrypt_packet(&c->crypto.rx, conn->in_packet, conn->payload_packet);
+		ret = !crypto_decrypt_packet(&rx, conn->in_packet, conn->payload_packet);
 
 	} else if (c->remote.secure == ESECURE_AUTH && c->remote.frag_flag == EFRAG_FLAG_NONE) {
 		ulogf_dbg("Received authenticated payload");
 		uint8_t rx_hash[crypto_shorthash_BYTES];
 		uint8_t hash[crypto_shorthash_BYTES];
 		uint8_t *nonce = conn->in_packet->data + conn->in_packet->index;
+		
+		/* offset nonce for this packet */
+		uint64_t rx_nonce = c->crypto.auth_rx.nonce + nonce_diff;
 
 		/* store received hash */
 		if (packet_r(conn->in_packet, rx_hash, sizeof(rx_hash)))
 			return 0;
 
 		/* overwrite received hash with nonce */
-		memcpy(nonce, &c->crypto.auth_rx.nonce, sizeof(c->crypto.auth_rx.nonce));
+		memcpy(nonce, &rx_nonce, sizeof(rx_nonce));
 
 		/* hash */
 		if (crypto_shorthash(hash, conn->in_packet->data, conn->in_packet->length, c->crypto.auth_rx.key))
@@ -389,6 +392,12 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 
 		/* passthrough */
 		packet_rw_packet(conn->in_packet, conn->payload_packet, packet_get_readable(conn->in_packet));
+	}
+
+	/* add rx nonce */
+	if (c->handshake_status >= EHANDSHAKE_STATUS_SERVER_OK) {
+		crypto_nonce_add(&c->crypto.rx, nonce_diff);
+		c->crypto.auth_rx.nonce += nonce_diff;
 	}
 
 	packet_rewind(conn->payload_packet);
