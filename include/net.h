@@ -127,6 +127,8 @@ struct netsettings {
 	uint8_t 	secure;
 	/* When set the server doesn't distribute it's public key to clients */
 	uint8_t 	dont_distribute_public_key;
+	/* Seconds to sleep between ticks when the server has no clients connected */
+	uint8_t 	idle_sleep_seconds;
 };
 
 struct srvevents {

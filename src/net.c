@@ -1910,6 +1910,18 @@ conn_process_non_blocking(netconn_t **conn)
 	conn_recv(conn);
 	if (!*conn)	return 0;
 
+	/* handle idle server */
+	if ((*conn)->type == ETYPE_SERVER) {
+		int_fast64_t idle_sleep = (*conn)->settings.idle_sleep_seconds;
+		if (idle_sleep) {
+			if (HASH_COUNT((*conn)->data.srv.connected_clients) == 0) {
+				idle_sleep *= 1000000;
+				utime_usleep(idle_sleep);
+				utime_remaining(&(*conn)->timing, idle_sleep);
+			}
+		}
+	}
+
 	const int_fast64_t target_us = (*conn)->tick_time_target_us;
 	const int_fast64_t remaining_us = utime_remaining(&(*conn)->timing, target_us);
 
