@@ -47,6 +47,7 @@ typedef struct {
 
 
 int32_t	netmsg_init(netmsg_ctx_t *restrict ctx, uint32_t prealloc_packet_bytes);
+void	netmsg_reset(netmsg_ctx_t *restrict ctx);
 void	netmsg_deinit(netmsg_ctx_t *restrict ctx);
 
 int32_t	netmsg_pack(netmsg_ctx_t *restrict ctx, packet_t *restrict p, uint8_t round_trip_ticks);

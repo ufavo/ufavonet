@@ -51,6 +51,17 @@ netmsg_init(netmsg_ctx_t *restrict ctx, uint32_t prealloc_packet_bytes)
 }
 
 inline void
+netmsg_reset(netmsg_ctx_t *restrict ctx)
+{
+	packet_t *pkt = ctx->pkt;
+	memset(ctx, 0, sizeof(*ctx));
+
+	ctx->pkt = pkt;
+	packet_rewind(ctx->pkt);
+	packet_set_length(ctx->pkt, 0);
+}
+
+inline void
 netmsg_deinit(netmsg_ctx_t *restrict ctx)
 {
 	packet_free(&ctx->pkt);
