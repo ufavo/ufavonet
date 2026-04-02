@@ -681,7 +681,7 @@ _server_client_init(netconn_t *restrict conn, usocket_addr_t *restrict cli_addr,
 		return NULL;
 	}
 
-	if (!_conncommon_mtu_config(&client->common, &conn->udp_sock.addr)) {
+	if (!_conncommon_mtu_config(&client->common, cli_addr)) {
 		_conncommon_deinit(&client->common);
 		ufree(client);
 		return NULL;
