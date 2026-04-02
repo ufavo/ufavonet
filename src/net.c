@@ -1788,8 +1788,6 @@ client_init(const struct clievents events, const struct netsettings settings, vo
 		return NULL;
 	}
 
-	/* call first onconnect */
-	_client_netmsg_pack_connect(&conn, NULL, 0);
 	return conn;
 }
 
@@ -1811,6 +1809,9 @@ client_connect(netconn_t *restrict conn, enum netconn_protocol proto, const char
 		usock_udp_deinit(&conn->udp_sock);
 		return 0;
 	}
+	/* call first onconnect */
+	netmsg_reset(&conn->data.cli.common.msgctx);
+	_client_netmsg_pack_connect((netconn_t **)&conn, NULL, 0);
 	return 1;
 }
 
