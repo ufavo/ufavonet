@@ -394,7 +394,8 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 	packet_rewind(conn->payload_packet);
 	if (ret) {
 		c->tick_local 			= c->remote.tick;
-		c->tick_remote_latest 	= c->remote.tick;
+		if (c->status != EPROT_STATUS_DISCONNECT)
+			c->tick_remote_latest 	= c->remote.tick;
 		c->tick_local_noresp_count = 0;
 	}
 	if (c->remote.payload_padding) {
@@ -608,7 +609,8 @@ _server_client_disconnect(netconn_t *restrict conn, netsrvclient_t *c, uint8_t r
 	if (!c->common.disconnect_reason)
 		c->common.disconnect_reason = reason;
 	if (conn) {
-		conn->data.srv.events.ondisconnect(conn, conn->userdata, c->common.disconnect_reason, c, &c->userdata);
+		if (c->common.status == EPROT_STATUS_CONNECTED)
+			conn->data.srv.events.ondisconnect(conn, conn->userdata, c->common.disconnect_reason, c, &c->userdata);
 		c->common.status = EPROT_STATUS_DISCONNECT;
 	} else {
 		c->common.status = EPROT_STATUS_DISCONNECT_PENDING;
@@ -709,7 +711,8 @@ _client_disconnect(netconn_t **__conn, uint8_t reason)
 
 	/* hold until the server replies. unless it's a timeout */
 	if (s->remote.status == EPROT_STATUS_DISCONNECT || reason == EDISCONNECT_TIMEOUT) {
-		conn->data.cli.events.ondisconnect(__conn, conn->userdata, reason);
+		if (s->status != EPROT_STATUS_DISCONNECT)
+			conn->data.cli.events.ondisconnect(__conn, conn->userdata, reason);
 		if (!*__conn) return;
 		s->remote.status = EPROT_STATUS_DISCONNECT;
 	}
