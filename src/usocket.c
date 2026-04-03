@@ -26,7 +26,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 
 #include "net_utils.h"
 #include "_hooks.h"
@@ -63,15 +62,17 @@ _hostname_any(const char *restrict hostname)
 	return 0;
 }
 
+#ifndef _WIN32
 static inline int
 usock_udp_setopt_mtu(usocket_t *restrict sock, int frag)
 {
-	if (setsockopt(sock->fd, IPPROTO_IP, IP_MTU_DISCOVER, &frag, sizeof(frag)) == SOCKET_ERROR) {
+	if (setsockopt(sock->fd, IPPROTO_IP, IP_MTU_DISCOVER, (const void *)&frag, sizeof(frag)) == SOCKET_ERROR) {
 		ulog_errno("Unable to change fragmentation behaviour. setsockopt failed");
 		return 0;
 	}
 	return 1;
 }
+#endif
 
 static inline int
 usock_udp_init(const char *restrict hostname, uint16_t port, usocket_t *restrict out)
@@ -91,9 +92,10 @@ usock_udp_init(const char *restrict hostname, uint16_t port, usocket_t *restrict
 	if (!unet_socket_flag_nonblocking(out->fd))
 		return 0;
 
+#ifndef _WIN32
 	if (!usock_udp_setopt_mtu(out, IP_PMTUDISC_PROBE))
 		return 0;
-
+#endif
 	out->addr.tcp_udp.sin_port = htons(port);
 	out->addr.tcp_udp.sin_family = AF_INET;
 	ulogf_ntc("Obtained UDP socket");
@@ -156,6 +158,12 @@ usock_udp_recv(usocket_t *restrict sock, usocket_addr_t *restrict addr, void *re
 static inline int
 usock_udp_get_local_mtu(usocket_addr_t *restrict addr)
 {
+#ifdef _WIN32
+	/* TODO: implement a way to get the local interface MTU for the given address.
+	 * IP_MTU is mentioned on `https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options`
+	 * but mingw fails with `error: ‘IP_MTU’ undeclared`. */
+	return 1500;
+#else
 	int fd;
 	if ( (fd = unet_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_INVALID ) {
 		ulog_errno("Failed to init temp socket");
@@ -176,6 +184,7 @@ usock_udp_get_local_mtu(usocket_addr_t *restrict addr)
 
 	unet_close(fd);
 	return pmtu;
+#endif
 }
 
 /*

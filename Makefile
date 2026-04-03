@@ -12,8 +12,8 @@ HFILES 		= $(wildcard include/*.h src/*.h)
 
 OBJ = ${CFILES:.c=.o}
 
-LDFLAGS += -flto
-SO_LDFLAGS += -flto -shared 
+LDFLAGS += -flto -lsodium
+SO_LDFLAGS += -flto -shared -lsodium 
 
 # platform
 ifneq (,$(findstring win64,$(PLATFORM)))

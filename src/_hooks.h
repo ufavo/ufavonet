@@ -90,6 +90,7 @@ extern ufavonet_global_t ufavonet_global;
 #endif
 
 #ifdef _WIN32
+#include <winsock2.h>
 #define ulog_errnof(fmt,...) \
 do { \
 	char *x = NULL; \
