@@ -175,6 +175,7 @@ _conn_outpkt_header_mtu_status(struct conncommon *restrict c)
 static inline void
 _conn_mtu_send_prepass(netconn_t *restrict conn, struct conncommon *restrict c)
 {
+#ifndef _WIN32
 	/* mtu discovery / reply */
 	/* detect loss and attempt mtu drop */
 	if (c->mtu_status == EMTU_STATUS_OK && (c->remote.frag_shared.noresp > 4 || c->tick_local_noresp_count > 4)) {
@@ -239,6 +240,7 @@ _conn_mtu_send_prepass(netconn_t *restrict conn, struct conncommon *restrict c)
 			ulogf_inf("MTU Discovery: %"PRIu16, _mtuv[c->mtu_idx]);
 		}
 	}
+#endif
 }
 
 static inline int
