@@ -78,26 +78,42 @@ handshake_server_onestep(packet_t 				*restrict pkt_in,
 
 	/* read ciphers */
 	uint8_t cipher = 0;
-	uint8_t cipher_idx = 0;
+	int cipher_idx = 0;
+	int first_match = -1;
 	do {
+		int cli_cipher_idx = 0;
 		do {
 			err = packet_r_8_t(&tmp, &cipher);
 			if (err) return EHANDSHAKE_ERR_INPUT;
 			
 			if (cipher == prefered_ciphers[cipher_idx]) {
-				ulogf_inf("Chosen cipher: %s", crypto_cipher_name(cipher-1));
-				/* skip all bytes up to the first zero */
-				for (cipher_idx = cipher; cipher_idx && !err; err = packet_r_8_t(&tmp, &cipher_idx));
-				if (err) return EHANDSHAKE_ERR_INPUT;
-				goto after_cipher;
+				if (first_match == -1)
+					first_match = cipher;
+				
+				int dist = (int)cli_cipher_idx - (int)cipher_idx;
+				if (dist < 0) dist = -dist;
+
+				if (dist <= 1) {
+					ulogf_inf("Chosen cipher: %s", crypto_cipher_name(cipher-1));
+					/* skip all bytes up to the first zero */
+					for (cipher_idx = cipher; cipher_idx && !err; err = packet_r_8_t(&tmp, &cipher_idx));
+					if (err) return EHANDSHAKE_ERR_INPUT;
+					goto after_cipher;
+				}
 			}
+			cli_cipher_idx++;
 		} while (cipher);
 		packet_rewind(&tmp);
 	} while (prefered_ciphers[++cipher_idx] && !cipher);
 
 	if (!cipher) {
-		ulogf_inf("No ciphers in common with the client. Unable to complete handshake.");
-		return EHANDSHAKE_ERR_CIPHERS;
+		if (first_match != -1) {
+			cipher = first_match;
+			ulogf_inf("Chosen cipher: %s", crypto_cipher_name(cipher-1));
+		} else {
+			ulogf_inf("No ciphers in common with the client. Unable to complete handshake.");
+			return EHANDSHAKE_ERR_CIPHERS;
+		}
 	}
 
 after_cipher:
