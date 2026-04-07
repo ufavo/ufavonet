@@ -363,12 +363,8 @@ netmsg_unpack_next(netmsg_ctx_t *restrict ctx, packet_t *restrict p, void **out,
 inline int32_t
 netmsg_enqueue(netmsg_ctx_t *restrict ctx, const void *data, const uint32_t size)
 {
-	if (!data) {
-		ulogf_crt("Attempting to enqueue message that points to NULL");
-		return -1;
-	}
-	if (!size) {
-		ulogf_crt("Attempting to enqueue message with length zero");
+	if (!data && size) {
+		ulogf_crt("Attempting to enqueue message of size %zu that points to NULL", size);
 		return -1;
 	}
 
