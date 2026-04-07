@@ -47,6 +47,7 @@ struct conncommon {
 	uint16_t 	tick_local_noresp_count;
 	uint16_t 	tick_local;
 	uint16_t 	tick_remote_latest;
+	uint16_t 	tick_disconnect_cnt;
 	uint16_t 	send_skip_count;
 
 	uint8_t 	status;
@@ -405,8 +406,7 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 	packet_rewind(conn->payload_packet);
 	if (ret) {
 		c->tick_local 			= c->remote.tick;
-		if (c->status != EPROT_STATUS_DISCONNECT)
-			c->tick_remote_latest 	= c->remote.tick;
+		c->tick_remote_latest 	= c->remote.tick;
 		c->tick_local_noresp_count = 0;
 	}
 	if (c->remote.payload_padding) {
@@ -626,7 +626,6 @@ _server_client_disconnect(netconn_t *restrict conn, netsrvclient_t *c, uint8_t r
 	} else {
 		c->common.status = EPROT_STATUS_DISCONNECT_PENDING;
 	}
-	c->common.tick_remote_latest = 0;
 }
 
 static inline int
@@ -720,17 +719,14 @@ _client_disconnect(netconn_t **__conn, uint8_t reason)
 	netconn_t *conn = *__conn;
 	struct conncommon *s = &conn->data.cli.common;
 
-	/* hold until the server replies. unless it's a timeout */
-	if (s->remote.status == EPROT_STATUS_DISCONNECT || reason == EDISCONNECT_TIMEOUT) {
-		if (s->status != EPROT_STATUS_DISCONNECT)
-			conn->data.cli.events.ondisconnect(__conn, conn->userdata, reason);
+	if (s->tick_disconnect_cnt == conn->settings.kick_notice_tick) {
+		conn->data.cli.events.ondisconnect(__conn, conn->userdata, reason);
 		if (!*__conn) return;
-		s->remote.status = EPROT_STATUS_DISCONNECT;
+		s->tick_disconnect_cnt++;
 	}
 
 	s->status = EPROT_STATUS_DISCONNECT;
 	s->disconnect_reason = reason;
-	s->tick_remote_latest = 0;
 }
 
 
@@ -1247,9 +1243,7 @@ _server_process_recv(netconn_t *restrict conn)
 				if (packet_r_8_t(conn->payload_packet, &reason))
 					reason = EDISCONNECT;
 				_server_client_disconnect(conn, c, reason);
-				_send_disconnect(conn, &c->sockaddr, reason, &c->common);
 			}
-			_server_client_free(conn, c);	
 			continue;
 		}
 
@@ -1309,7 +1303,7 @@ _server_process_send(netconn_t *restrict conn)
 
 		/* handle disconnected */
 		if (client->common.status == EPROT_STATUS_DISCONNECT) {
-			if (client->common.tick_remote_latest++ == conn->settings.kick_notice_tick) {
+			if (client->common.tick_disconnect_cnt++ >= conn->settings.kick_notice_tick) {
 				/* Disconnect notice already sent multiple times. Remove client */
 				if (!client->hh.next) {
 					_server_client_free(conn, client);
@@ -1426,8 +1420,6 @@ _client_process_recv(netconn_t **__conn)
 			uint8_t reason;
 			if (packet_r_8_t(conn->payload_packet, &reason))
 				reason = EDISCONNECT;
-			/* report back to the server */
-			_send_disconnect(conn, &conn->udp_sock.addr, reason, s);
 			_client_disconnect(__conn, reason);
 			return 0;
 		}
@@ -1460,19 +1452,15 @@ _client_process_send(netconn_t **__conn)
 	_conncommon_tick(s, conn->rtt_ema_alpha);
 
 	/* Handle disconnect */
-	if (s->remote.status == EPROT_STATUS_DISCONNECT) {
-		_client_disconnect(__conn, s->disconnect_reason);
-		return;
-	}
-
 	if (s->status == EPROT_STATUS_DISCONNECT) {
-		if (s->tick_remote_latest++ >= conn->settings.kick_notice_tick) {
+		if (s->tick_disconnect_cnt++ >= conn->settings.kick_notice_tick) {
 			/* Disconnect notice already sent multiple times */
 			s->remote.status = EPROT_STATUS_DISCONNECT;
-			_client_disconnect(__conn, s->disconnect_reason);
 			return;
 		}
-		_send_disconnect(conn, &conn->udp_sock.addr, conn->data.cli.common.disconnect_reason, s);
+		_client_disconnect(__conn, s->disconnect_reason);
+		if (*__conn)
+			_send_disconnect(conn, &conn->udp_sock.addr, conn->data.cli.common.disconnect_reason, s);
 		return;
 	}
 
@@ -1495,8 +1483,9 @@ _client_process_send(netconn_t **__conn)
 	int32_t err = netmsg_pack(&conn->data.cli.common.msgctx, conn->payload_packet, (uint8_t)s->round_trip_ticks_ema);
 	if (err != ENETMSG_ERR_NONE) {
 		ulogf_crt("Failed to pack messages. Dropping connection. Err: %" PRIi32, err);
-		_send_disconnect(conn, &conn->udp_sock.addr, EDISCONNECT_INTERNAL_ERROR, s);
 		_client_disconnect(__conn, EDISCONNECT_INTERNAL_ERROR);
+		if (*__conn)
+			_send_disconnect(conn, &conn->udp_sock.addr, EDISCONNECT_INTERNAL_ERROR, s);
 		return;
 	}
 
@@ -1832,7 +1821,6 @@ client_disconnect(netconn_t *restrict conn)
 	if (!conn) return;
 	conn->data.cli.common.status = EPROT_STATUS_DISCONNECT;
 	conn->data.cli.common.disconnect_reason = EDISCONNECT;
-	conn->data.cli.common.tick_remote_latest = 0;
 }
 
 int32_t
