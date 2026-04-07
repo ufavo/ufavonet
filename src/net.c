@@ -347,8 +347,6 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 	if (c->handshake_status >= EHANDSHAKE_STATUS_SERVER_OK) {
 		/* refuses unauthenticated packets after handshake */
 		if (c->remote.secure == ESECURE_NONE) {
-			c->tick_local 			= c->remote.tick;
-			c->tick_remote_latest 	= c->remote.tick;
 			c->tick_local_noresp_count = 0;
 			return 0;
 		}
@@ -356,6 +354,11 @@ _conn_payload_from_secure(netconn_t *restrict conn, struct conncommon *restrict 
 		/* passthrough */
 		ulogf_dbg("Received passthrough payload, remote: %d", c->remote.tick);
 		packet_rw_packet(conn->in_packet, conn->payload_packet, packet_get_readable(conn->in_packet));
+		packet_rewind(conn->payload_packet);
+		c->tick_local 			= c->remote.tick;
+		c->tick_remote_latest 	= c->remote.tick;
+		c->tick_local_noresp_count = 0;
+		return 1;
 	}
 
 	if (c->remote.secure == ESECURE_ENCRYPT) {
