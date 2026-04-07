@@ -364,7 +364,7 @@ inline int32_t
 netmsg_enqueue(netmsg_ctx_t *restrict ctx, const void *data, const uint32_t size)
 {
 	if (!data && size) {
-		ulogf_crt("Attempting to enqueue message of size %zu that points to NULL", size);
+		ulogf_crt("Attempting to enqueue message of size %"PRIu32" that points to NULL", size);
 		return -1;
 	}
 
