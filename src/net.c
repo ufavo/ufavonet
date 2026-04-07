@@ -29,7 +29,7 @@
 #include <unistd.h>
 
 #include "_hooks.h"
-#include "usocket.c"
+#include "usocket.h"
 #include "netmsg.h"
 #include "_crypto.h"
 #include "handshake.h"
