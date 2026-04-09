@@ -197,6 +197,10 @@ _conn_mtu_send_prepass(netconn_t *restrict conn, struct conncommon *restrict c)
 
 	if (c->remote.mtu != c->mtu && c->remote.mtu) {
 		/* other party is receiving. found mtu? try going up on next ticks */
+		if (c->remote.mtu < _mtuv[0]) {
+			ulogf_wrn("Invalid MTU claim: received value (%"PRIu16") below minimum (%"PRIu16").", c->remote.mtu, _mtuv[0]);
+			c->remote.mtu = _mtuv[0];
+		}
 		c->mtu = c->remote.mtu;
 		c->remote.mtu = 0;
 		ulogf_dbg("Received MTU: %"PRIu16, c->mtu);
@@ -1142,19 +1146,17 @@ _conncommon_tick(struct conncommon *restrict c, float rtt_ema_alpha)
 static inline uint16_t
 _mtu_retain_reply(struct conncommon *restrict c, uint16_t late_mtu_reply, uint16_t mtu_reply, uint16_t tick_rate)
 {
-	uint16_t r = mtu_reply;
-	if (c->remote.mtu_reply) {
-		if (c->mtu_reply_retention < tick_rate) {
-			if (late_mtu_reply > mtu_reply) {
-				r = late_mtu_reply;
-				c->mtu_reply_retention = 0;
-			}
-		} else {
-			c->mtu_reply_retention = 0;
-		}
-		c->mtu_reply_retention++;
+	if (late_mtu_reply > mtu_reply) {
+		mtu_reply = late_mtu_reply;
+	} else {
+		c->mtu_reply_retention = 0;
 	}
-	return r;
+	if (c->mtu_reply_retention >= tick_rate) {
+		c->mtu_reply_retention = 0;
+		mtu_reply = 0;
+	}
+	c->mtu_reply_retention++;
+	return mtu_reply;
 }
 
 static inline netsrvclient_t *
@@ -1356,10 +1358,10 @@ _server_process_send(netconn_t *restrict conn)
 			 * one write or onsendpkt() performed one or more writes. */
 			if (packet_get_write_op_count(conn->payload_packet) == 1) {
 				/* avoid sending empty packets if possible */
-				if (client->common.send_skip_count++ < conn->settings.timeout_tick / 8)
+				if (client->common.send_skip_count++ < conn->settings.timeout_tick / 4)
 					goto next_client;
-				client->common.send_skip_count = 0;
 			}
+			client->common.send_skip_count = 0;
 		}
 
 		_conn_payload_secure(conn, &client->common, &client->sockaddr);
@@ -1501,10 +1503,10 @@ _client_process_send(netconn_t **__conn)
 		 * one write or onsendpkt() performed one or more writes. */
 		if (packet_get_write_op_count(conn->payload_packet) == 1) {
 			/* avoid sending empty packets if possible */
-			if (s->send_skip_count++ < conn->settings.timeout_tick / 8)
+			if (s->send_skip_count++ < conn->settings.timeout_tick / 4)
 				return;
-			s->send_skip_count = 0;
 		}
+		s->send_skip_count = 0;
 	}
 
 	_conn_payload_secure(conn, s, &conn->udp_sock.addr);
