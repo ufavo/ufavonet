@@ -198,8 +198,12 @@ _conn_mtu_send_prepass(netconn_t *restrict conn, struct conncommon *restrict c)
 	if (c->remote.mtu != c->mtu && c->remote.mtu) {
 		/* other party is receiving. found mtu? try going up on next ticks */
 		if (c->remote.mtu < _mtuv[0]) {
-			ulogf_wrn("Invalid MTU claim: received value (%"PRIu16") below minimum (%"PRIu16").", c->remote.mtu, _mtuv[0]);
-			c->remote.mtu = _mtuv[0];
+			if (c->mtu_status == EMTU_STATUS_OK || c->mtu_status == EMTU_STATUS_DISCOVERY_UP) {
+				c->remote.mtu = c->mtu;
+			} else {
+				ulogf_wrn("Invalid MTU claim: received value (%"PRIu16") below minimum (%"PRIu16").", c->remote.mtu, _mtuv[0]);
+				c->remote.mtu = _mtuv[0];
+			}
 		}
 		c->mtu = c->remote.mtu;
 		c->remote.mtu = 0;
