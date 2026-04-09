@@ -1358,7 +1358,7 @@ _server_process_send(netconn_t *restrict conn)
 			 * one write or onsendpkt() performed one or more writes. */
 			if (packet_get_write_op_count(conn->payload_packet) == 1) {
 				/* avoid sending empty packets if possible */
-				if (client->common.send_skip_count++ < conn->settings.timeout_tick / 4)
+				if (client->common.send_skip_count++ < conn->settings.timeout_tick / 4 && !client->common.remote.mtu_reply)
 					goto next_client;
 			}
 			client->common.send_skip_count = 0;
@@ -1503,7 +1503,7 @@ _client_process_send(netconn_t **__conn)
 		 * one write or onsendpkt() performed one or more writes. */
 		if (packet_get_write_op_count(conn->payload_packet) == 1) {
 			/* avoid sending empty packets if possible */
-			if (s->send_skip_count++ < conn->settings.timeout_tick / 4)
+			if (s->send_skip_count++ < conn->settings.timeout_tick / 4 && !s->remote.mtu_reply)
 				return;
 		}
 		s->send_skip_count = 0;
