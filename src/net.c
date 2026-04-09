@@ -1281,6 +1281,10 @@ _server_process_recv(netconn_t *restrict conn)
 			}
 		}
 
+		/* safeguard onreceivepkt */
+		if (c->common.remote.status != EPROT_STATUS_CONNECTED || c->common.status != EPROT_STATUS_CONNECTED)
+			continue;
+
 		/* handle messages */
 		if (!_server_netmsg_unpack_all(conn, c, conn->payload_packet)) {
 			/* error. client being dropped. */
@@ -1445,7 +1449,8 @@ _client_process_recv(netconn_t **__conn)
 		}
 
 		s->status = s->remote.status;
-		if (s->remote.status == EPROT_STATUS_CONNECT)
+		/* safeguard onreceivepkt */
+		if (s->remote.status != EPROT_STATUS_CONNECTED || s->status != EPROT_STATUS_CONNECTED)
 			continue;
 		
 		conn->data.cli.events.onreceivepkt(conn, conn->userdata, conn->payload_packet);
