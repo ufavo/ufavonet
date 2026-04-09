@@ -212,7 +212,7 @@ _conn_mtu_send_prepass(netconn_t *restrict conn, struct conncommon *restrict c)
 			c->mtu_cooldown_ticks = conn->settings.tick_rate - 1;
 			ulogf_dbg("Advertised maximum MTU: %"PRIu16", currently at %"PRIu16, _mtuv[c->mtu_idx], c->mtu);
 			c->mtu_status = EMTU_STATUS_OK;
-		} else if (c->mtu >= _mtuv[c->mtu_idx]) {
+		} else if (c->mtu > _mtuv[c->mtu_idx]) {
 			/* avoid further advertising of this mtu */
 			c->mtu_cooldown_ticks = 0;
 			while (c->mtu_idx < MTUV_LENGTH-1 && c->mtu >= _mtuv[c->mtu_idx])
@@ -234,9 +234,14 @@ _conn_mtu_send_prepass(netconn_t *restrict conn, struct conncommon *restrict c)
 		/* send 0.25s worth of samples, interleaved to avoid 100% loss when reaching the path mtu (each step up takes twice the amount of samples) */
 		if (c->mtu_cooldown_ticks >= conn->settings.tick_rate / 4) {
 			c->mtu_cooldown_ticks = 0;
-			if (c->mtu_idx < MTUV_LENGTH-1 && _mtuv[c->mtu_idx] < c->mtu_local_max) {
-				c->mtu_idx++;
-			} else {
+			uint_fast8_t inc = 0;
+			if (c->mtu_idx < MTUV_LENGTH-1) {
+				if (_mtuv[c->mtu_idx+1] <= c->mtu_local_max) {
+					c->mtu_idx++;
+					inc = 1;
+				}
+			}
+			if (!inc) {
 				/* reached maximum mtu */
 				ulogf_inf("Advertised MTU: %"PRIu16", currently at %"PRIu16, _mtuv[c->mtu_idx], c->mtu);
 				c->mtu_status = EMTU_STATUS_OK;
