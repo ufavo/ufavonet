@@ -277,23 +277,30 @@ packet_w_8_t(packet_t *restrict p, const void *restrict ptr)
 	return packet_w(p, ptr, sizeof(int8_t));
 }
 
-inline int
-packet_w_bits(packet_t *restrict p, const uint8_t src, const int n)
+static inline int
+_packet_w_bits(packet_t *restrict p, const uint8_t src, const uint8_t n, packet_deferred_bits_t *restrict loc)
 {
-	uint16_t 	masked;
-	uint8_t 	t;
-	int err = 0;
+	uint_fast8_t 	loc_idx = 0;
+	uint8_t 		t, masked;
+	int 			err = 0;
+
 	if (p->bits_byte == NULL) {
 		t = 0;
+		
 		err = packet_w_8_t(p, &t);
-		if(err > 0) {
-			return err;
-		}
+		if (err > 0) return err;
+
+		loc->byte_idx[loc_idx++] = p->index - 1;
+		loc->bit_idx = 0;
+		
 		p->bits_byte = p->data + p->index - 1;
 		p->bits_index = 0;
 		p->write_op_count--;
 	} else if (p->bits_index + n > 8) {
 		WRITECHECK(p, 1);
+		
+		loc->byte_idx[loc_idx++] = p->bits_byte - p->data;
+		loc->bit_idx = p->bits_index;
 	}
 
 	masked = (src & (0xFF >> (8-n)));
@@ -304,9 +311,9 @@ packet_w_bits(packet_t *restrict p, const uint8_t src, const int n)
 		/* needs another byte to fully store src */
 		t = 0;
 		err = packet_w_8_t(p, &t);
-		if(err > 0) {
-			return err;
-		}
+		if (err > 0) return err;
+
+		loc->byte_idx[loc_idx] = p->index - 1;
 		p->bits_byte = p->data + p->index - 1;
 
 		p->bits_index -= 8;
@@ -316,14 +323,65 @@ packet_w_bits(packet_t *restrict p, const uint8_t src, const int n)
 		p->bits_byte = NULL;
 		p->bits_index = 0;
 	}
+
 	p->write_op_count++;
-	return 0;
+	return EPACKET_ERR_NONE;
 }
 
 inline int
-packet_r_bits(packet_t *restrict p, uint8_t *restrict ptr, const int n)
+packet_w_bits(packet_t *restrict p, const uint8_t src, const uint8_t n)
 {
-	if (n <= 0 || n > 8) return EPACKET_ERR_OUT_OF_BOUNDS;
+	if (n > 8) return EPACKET_ERR_OUT_OF_BOUNDS;
+
+	packet_deferred_bits_t dummy;
+	return _packet_w_bits(p, src, n, &dummy);
+}
+
+inline int
+packet_w_bits_deferred(packet_t *restrict p, const uint8_t src, const uint8_t n, packet_deferred_bits_t *restrict loc)
+{
+	if (n > 8) return EPACKET_ERR_OUT_OF_BOUNDS;
+
+	loc->byte_idx[0] = loc->byte_idx[1] = 0;
+	loc->bit_idx = 0;
+	loc->n = n;
+	return _packet_w_bits(p, src, n, loc);
+}
+
+inline int
+packet_w_bits_over(packet_t *restrict p, const uint8_t src, const packet_deferred_bits_t loc)
+{
+	if (loc.bit_idx >= 8 || loc.n > 8 || loc.byte_idx[0] > p->length)
+		return EPACKET_ERR_OUT_OF_BOUNDS;
+
+	uint8_t n = loc.n;
+	uint8_t bit_idx = loc.bit_idx;
+	uint8_t mask = (0xFF >> (8-n));
+	uint8_t masked = (src & mask);
+
+	// set to zero before storing, making overwrites possible
+	p->data[loc.byte_idx[0]] &= ~(mask << bit_idx);
+	p->data[loc.byte_idx[0]] |= masked << bit_idx;
+	bit_idx += n;
+
+	// handle extra byte
+	if (bit_idx > 8) {
+		if (loc.byte_idx[1] > p->length)
+			return EPACKET_ERR_OUT_OF_BOUNDS;
+
+		bit_idx -= 8;
+		// set to zero before storing, making overwrites possible
+		p->data[loc.byte_idx[1]] &= ~(mask >> (n - bit_idx));
+		p->data[loc.byte_idx[1]] |= masked >> (n - bit_idx);
+	}
+
+	return EPACKET_ERR_NONE;
+}
+
+inline int
+packet_r_bits(packet_t *restrict p, uint8_t *restrict ptr, const uint8_t n)
+{
+	if (n > 8) return EPACKET_ERR_OUT_OF_BOUNDS;
 
 	*ptr = 0;
 

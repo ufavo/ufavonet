@@ -28,6 +28,12 @@
 
 typedef struct packet packet_t;
 
+typedef struct {
+	uint32_t 	byte_idx[2];
+	uint8_t		bit_idx;
+	uint8_t 	n;
+} packet_deferred_bits_t;
+
 enum packeterr
 {
 	EPACKET_ERR_NONE = 0,
@@ -116,7 +122,17 @@ int packet_w_8_t(packet_t *restrict p, const void *restrict ptr);
  * `n` ranges from 1 to 8.
  * `packet_r_bits` should be used for reading.
  * Returns `enum packeterr` error code. */
-int packet_w_bits(packet_t *restrict p, const uint8_t src, const int n);
+int packet_w_bits(packet_t *restrict p, const uint8_t src, const uint8_t n);
+/* Adds `n` bits from `src` to `p` and stores the location information required to overwrite those bits into `loc`.
+ * `n` ranges from 1 to 8.
+ * `packet_w_bits_over()` can be called later with `loc` to overwrite those bits.
+ * `packet_r_bits` should be used for reading.
+ * Returns `enum packeterr` error code. */
+int packet_w_bits_deferred(packet_t *restrict p, const uint8_t src, const uint8_t n, packet_deferred_bits_t *restrict loc);
+/* Overwrites bits at location `loc` with `src`.
+ * `packet_r_bits` should be used for reading.
+ * Returns `enum packeterr` error code. */
+int packet_w_bits_over(packet_t *restrict p, const uint8_t src, const packet_deferred_bits_t loc);
 /* Adds `value` to `p` using variable length encoding.
  * This function is not suitable for floating point variables.
  * `value` cannot be bigger than 29bits.
@@ -135,7 +151,7 @@ int packet_r_16_t(packet_t *restrict p, void *restrict ptr);
 /* Returns `enum packeterr` error code. */
 int packet_r_8_t(packet_t *restrict p, void *restrict ptr);
 /* Returns `enum packeterr` error code. */
-int packet_r_bits(packet_t *restrict p, uint8_t *restrict ptr, const int n);
+int packet_r_bits(packet_t *restrict p, uint8_t *restrict ptr, const uint8_t n);
 /* Returns `enum packeterr` error code. */
 int packet_r_vlen29(packet_t *restrict p, uint32_t *restrict ptr);
 
